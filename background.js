@@ -8,6 +8,7 @@ const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
 let actionStore = null;
 let initPromise = null; // Tracks ongoing initialization
+let currentTaskController = null; // AbortController for the running task
 
 // Initialize on startup
 async function init() {
@@ -110,8 +111,25 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'AGENT_RUN_TASK': {
-        const result = await agentCore.runTask(payload.task, payload.tabId, payload.messages || null);
-        sendResponse({ success: true, data: result });
+        // Abort any previous task still running
+        if (currentTaskController) currentTaskController.abort();
+        currentTaskController = new AbortController();
+        const taskSignal = currentTaskController.signal;
+        try {
+          const result = await agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal);
+          sendResponse({ success: true, data: result });
+        } finally {
+          currentTaskController = null;
+        }
+        break;
+      }
+
+      case 'STOP_TASK': {
+        if (currentTaskController) {
+          currentTaskController.abort();
+          currentTaskController = null;
+        }
+        sendResponse({ success: true });
         break;
       }
 

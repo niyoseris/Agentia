@@ -503,10 +503,14 @@ async function continueTask() {
   }
 }
 
-function stopTask() {
-  isRunningTask = false;
+async function stopTask() {
+  taskLog('info', '⏹ Durduruluyor...');
+  try {
+    await bg('STOP_TASK', {});
+  } catch {}
+  // UI update happens when TASK_STOPPED event arrives from agent-core
+  // but also reset here as fallback
   setTaskRunning(false);
-  taskLog('info', 'Görev durduruldu');
   showContinueArea(false);
 }
 
@@ -533,6 +537,11 @@ function handleAgentEvent(data) {
       break;
     case 'TASK_COMPLETE':
       taskLog('final', '✓ Tamamlandı: ' + (data.result || '').substring(0, 120));
+      break;
+    case 'TASK_STOPPED':
+      taskLog('info', '⏹ Görev durduruldu');
+      setTaskRunning(false);
+      showContinueArea(false);
       break;
     case 'ADAPTIVE_REPLAY_START':
       taskLog('info', `🔄 Adaptif tekrar başladı: ${data.recording}`);

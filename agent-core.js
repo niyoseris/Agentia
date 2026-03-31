@@ -575,7 +575,8 @@ export class AgentCore {
 
   // ---- Autonomous Task with Native Tool Calling ----
   // existingMessages: pass prior conversation to continue from where it left off
-  async runTask(taskDescription, tabId, existingMessages = null) {
+  // signal: AbortController signal — abort() stops the loop between iterations
+  async runTask(taskDescription, tabId, existingMessages = null, signal = null) {
     let messages;
     if (existingMessages && existingMessages.length > 0) {
       // Continue existing session — append new user turn
@@ -593,6 +594,16 @@ export class AgentCore {
     this._notify({ type: 'TASK_START', task: taskDescription });
 
     while (iterations < this.maxToolIterations) {
+      // Check abort signal before each LLM call
+      if (signal?.aborted) {
+        this._notify({ type: 'TASK_STOPPED' });
+        this._bgMsg('SAVE_TASK_HISTORY', {
+          task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
+          log, messages, success: false
+        }).catch(() => {});
+        return { success: false, error: 'Durduruldu', log, messages };
+      }
+
       iterations++;
 
       const res = await fetch(`${this.apiBase}/api/chat`, {
@@ -702,6 +713,16 @@ export class AgentCore {
           role: 'tool',
           content: JSON.stringify(this._sanitizeToolResult(toolName, toolResult))
         });
+
+        // Check abort signal after each tool execution too
+        if (signal?.aborted) {
+          this._notify({ type: 'TASK_STOPPED' });
+          this._bgMsg('SAVE_TASK_HISTORY', {
+            task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
+            log, messages, success: false
+          }).catch(() => {});
+          return { success: false, error: 'Durduruldu', log, messages };
+        }
       }
     }
 
