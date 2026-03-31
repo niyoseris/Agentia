@@ -368,8 +368,17 @@ async function handleTabAction(payload) {
   const { action } = payload;
 
   switch (action) {
-    case 'create':
-      return await chrome.tabs.create({ url: payload.url, active: payload.active ?? true });
+    case 'create': {
+      const newTab = await chrome.tabs.create({ url: payload.url, active: payload.active ?? true });
+      // If a URL was given, wait for the page to finish loading before returning
+      if (payload.url) {
+        await waitForTabLoad(newTab.id);
+        // Return the current (post-load) tab state so the agent sees the real URL
+        const loaded = await chrome.tabs.get(newTab.id).catch(() => newTab);
+        return loaded;
+      }
+      return newTab;
+    }
 
     case 'close':
       await chrome.tabs.remove(payload.tabId);
@@ -379,9 +388,13 @@ async function handleTabAction(payload) {
       await chrome.tabs.update(payload.tabId, { active: true });
       return { activated: true };
 
-    case 'navigate':
-      await chrome.tabs.update(payload.tabId, { url: payload.url });
-      return { navigated: true };
+    case 'navigate': {
+      const navTabId = payload.tabId || (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id;
+      if (!navTabId) throw new Error('No tab to navigate');
+      await chrome.tabs.update(navTabId, { url: payload.url });
+      await waitForTabLoad(navTabId);
+      return { navigated: true, url: payload.url };
+    }
 
     case 'get_all':
       return await chrome.tabs.query({});
@@ -416,6 +429,21 @@ async function handleTabAction(payload) {
 // ---- DOM Actions ----
 async function handleDomAction(payload, tabId) {
   const { action } = payload;
+
+  // Guard: can't inject scripts into chrome:// or extension pages
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab) {
+    const url = tab.url || '';
+    if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
+      // If the tab is still at an internal URL, wait a moment for it to navigate
+      await new Promise(r => setTimeout(r, 1500));
+      const refreshed = await chrome.tabs.get(tabId).catch(() => tab);
+      const newUrl = refreshed.url || '';
+      if (newUrl.startsWith('chrome://') || newUrl.startsWith('chrome-extension://') || newUrl.startsWith('about:')) {
+        return { error: `Cannot run DOM actions on internal page (${newUrl}). Use tab_navigate to load a real webpage first.` };
+      }
+    }
+  }
 
   const results = await chrome.scripting.executeScript({
     target: { tabId },
