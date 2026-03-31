@@ -434,25 +434,24 @@ const AGENT_SYSTEM_PROMPT = `You are Agentia, an agentic browser assistant. You 
 - For links/products: use href values from dom_query_all with tab_navigate instead of dom_click
 - When you have enough data to answer a simple question, stop browsing and respond
 
-## File & Report Tasks (MANDATORY PATTERN)
-When user asks for a report, guide, list, HTML page, or any document — follow this exact flow:
+## File & Report Tasks (MANDATORY)
+When the user asks for a report, guide, list, HTML page, or any document:
 
-1. **file_create** — Call IMMEDIATELY as the first step. Create an HTML skeleton with the page title, CSS styling, and empty sections. Save the returned fileKey.
-2. **Research** — Browse the web, extract data, collect content.
-3. **file_update** — After each source or major finding, call file_update with the FULL accumulated HTML (includes everything gathered so far + new items). Do this progressively — do not wait until the end.
-4. **file_open** — Call as the VERY LAST step when research is complete to open the finished page.
+**Option A — Simple one-shot (PREFERRED for most tasks):**
+1. Research first — browse all sources, collect all data
+2. Call **create_file** ONCE at the end with the COMPLETE HTML content
+   - `create_file` creates AND opens the file in one step — it is done
 
-Example for "research X and make a page":
-- file_create → { fileKey: "agentia_file_123" }  ← skeleton HTML
-- tab_navigate → research source 1
-- file_update(fileKey, HTML with item 1)
-- tab_navigate → research source 2
-- file_update(fileKey, HTML with items 1+2)
-- ... continue for all sources ...
-- file_update(fileKey, final complete HTML)
-- file_open(fileKey)  ← opens the finished page
+**Option B — Progressive (only for long multi-source tasks):**
+1. `file_create` with skeleton HTML → note the returned fileKey
+2. Research and browse
+3. `file_update(fileKey, fullHtml)` after EACH source — always pass FULL accumulated HTML
+4. `file_open(fileKey)` as the VERY LAST step
 
-NEVER say "I will create the file now" — call the tool. NEVER skip file_open at the end.
+**Rules:**
+- NEVER respond with text saying "I'll create the file" — call the tool
+- NEVER leave a task with "I have finished my research" without creating the file
+- ALWAYS end with a file tool call when the task involves a document/report
 
 ## HTML File Quality
 When creating HTML reports:
@@ -595,6 +594,11 @@ export class AgentCore {
     let activeFileKey = null;   // fileKey from the most recent file_create call
     let fileUpdateCount = 0;    // how many file_update calls have been made
     let fileOpened = false;     // whether file_open was called
+    let currentPageUrl = '';    // track current page for research buffer
+
+    // Research buffer — raw text snippets collected during browsing
+    // Used to build the final HTML if the model never called file_update
+    const researchBuffer = [];
 
     this._notify({ type: 'TASK_START', task: taskDescription });
 
@@ -630,7 +634,7 @@ export class AgentCore {
           messages,
           tools: AGENT_TOOLS,
           stream: false,
-          options: { temperature: 0.2, num_predict: this.maxTokens }
+          options: { temperature: 0.2, num_predict: Math.max(this.maxTokens, 8192) }
         })
       });
 
@@ -647,21 +651,24 @@ export class AgentCore {
         // ── Auto-open file if agent forgot ──────────────────────────────────
         // If a file was created but file_open was never called, do it now
         if (activeFileKey && !fileOpened) {
-          this._notify({ type: 'AGENT_THOUGHT', content: `⚠ Dosya açılmadı, otomatik açılıyor (${activeFileKey})...` });
+          this._notify({ type: 'AGENT_THOUGHT', content: `⚠ Dosya içeriği oluşturuluyor (${activeFileKey})...` });
           try {
-            // If file has content but wasn't updated, prompt agent to update first
-            if (fileUpdateCount === 0 && result.trim()) {
-              // Use the text result as file content — update the skeleton with it
-              await this._bgMsg('FILE_UPDATE', {
-                fileKey: activeFileKey,
-                content: `<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agentia Report</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:900px;margin:40px auto;padding:20px;background:#f5f6fa;color:#1a1d2e}h1{background:linear-gradient(135deg,#5b52e8,#3a7bd5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2em;margin-bottom:20px}p,li{line-height:1.8;margin:8px 0}.content{background:#fff;border-radius:12px;padding:30px;box-shadow:0 2px 12px rgba(0,0,0,0.08);white-space:pre-wrap}</style></head><body><h1>${taskDescription}</h1><div class="content">${result.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div></body></html>`
-              });
+            if (fileUpdateCount === 0) {
+              // Agent never updated the file — generate HTML from research buffer
+              const html = await this._buildFinalHtml(taskDescription, result, researchBuffer);
+              if (html) {
+                await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
+                fileUpdateCount++;
+                this._notify({ type: 'AGENT_THOUGHT', content: '✓ Dosya içeriği oluşturuldu, açılıyor...' });
+              }
             }
             await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
             fileOpened = true;
             this._notify({ type: 'TOOL_CALL', tool: 'file_open', args: { fileKey: activeFileKey } });
             this._notify({ type: 'TOOL_RESULT', tool: 'file_open', result: { opened: true, auto: true } });
-          } catch {}
+          } catch (e) {
+            this._notify({ type: 'AGENT_THOUGHT', content: `⚠ Dosya açma hatası: ${e.message}` });
+          }
         }
 
         // ── Empty result fallback ────────────────────────────────────────────
@@ -731,6 +738,21 @@ export class AgentCore {
           log.push({ type: 'tool_result', tool: toolName, result: sanitized });
           this._notify({ type: 'TOOL_RESULT', tool: toolName, result: sanitized });
 
+          // ── Capture research data for fallback HTML generation ─────────────
+          if (toolName === 'tab_navigate' || toolName === 'tab_create') {
+            currentPageUrl = toolResult?.url || '';
+          }
+          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'page_get_info'].includes(toolName) && toolResult) {
+            let snippet = '';
+            if (toolResult.text) snippet = toolResult.text;
+            else if (toolResult.content) snippet = toolResult.content;
+            else if (toolResult.elements) snippet = toolResult.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
+            else if (toolResult.url) snippet = `[${toolResult.title}](${toolResult.url})`;
+            if (snippet.length > 40) {
+              researchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
+            }
+          }
+
           // ── Track file operations ──────────────────────────────────────────
           if (toolName === 'file_create' && sanitized.fileKey) {
             activeFileKey = sanitized.fileKey;
@@ -768,7 +790,12 @@ export class AgentCore {
 
     // Max iterations — still auto-open file if one was created
     if (activeFileKey && !fileOpened) {
+      this._notify({ type: 'AGENT_THOUGHT', content: '⚠ Max iterasyon — dosya içeriği oluşturuluyor...' });
       try {
+        if (fileUpdateCount === 0) {
+          const html = await this._buildFinalHtml(taskDescription, '', researchBuffer);
+          if (html) await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
+        }
         await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
         this._notify({ type: 'TOOL_CALL', tool: 'file_open', args: { fileKey: activeFileKey } });
         this._notify({ type: 'TOOL_RESULT', tool: 'file_open', result: { opened: true, auto: true } });
@@ -781,6 +808,64 @@ export class AgentCore {
       log, messages, success: false
     }).catch(() => {});
     return { success: false, error: 'Max iterations reached', log, messages };
+  }
+
+  // ---- Final HTML Builder (fallback when agent forgot to call file_update) ----
+  // Uses research buffer + one extra LLM call to generate HTML from raw findings
+  async _buildFinalHtml(taskDescription, agentTextResult, researchBuffer) {
+    // Combine research buffer into a readable summary
+    const bufferText = researchBuffer
+      .map((item, i) => `--- Kaynak ${i + 1}${item.url ? ' (' + item.url + ')' : ''} ---\n${item.text}`)
+      .join('\n\n');
+
+    // If we have nothing, use the agent's text result
+    const context = bufferText || agentTextResult || '(Araştırma verisi bulunamadı)';
+
+    this._notify({ type: 'AGENT_THOUGHT', content: `📄 ${researchBuffer.length} kaynaktan HTML oluşturuluyor...` });
+
+    try {
+      const res = await fetch(`${this.apiBase}/api/chat`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({
+          model: this.model,
+          messages: [
+            {
+              role: 'system',
+              content: 'You are an expert web developer. Generate beautiful, complete HTML pages. Output ONLY raw HTML starting with <!DOCTYPE html> — no markdown, no explanation, no code fences.'
+            },
+            {
+              role: 'user',
+              content: `Task: "${taskDescription}"\n\nResearch data collected:\n\n${context.slice(0, 12000)}\n\nCreate a complete, visually rich HTML page presenting all the findings above.\n\nRequirements:\n- Inline CSS only (no external files)\n- Gradient header with page title\n- Card grid layout for items (3 columns, responsive)\n- Each card: title, description, source URL as link\n- Modern design: rounded corners, shadows, hover effects\n- Turkish or same language as task\n- Start with <!DOCTYPE html> and include everything in one file\n\nOutput ONLY the HTML code:`
+            }
+          ],
+          stream: false,
+          options: { temperature: 0.3, num_predict: 8192 }
+        })
+      });
+
+      if (!res.ok) return null;
+      const data = await res.json();
+      let html = data.message?.content || '';
+
+      // Strip markdown code fences if model wrapped it anyway
+      html = html.replace(/^```html?\s*/i, '').replace(/\s*```$/, '').trim();
+
+      // Validate it's actually HTML
+      if (html.toLowerCase().includes('<!doctype') || html.toLowerCase().includes('<html')) {
+        return html;
+      }
+
+      // If model returned plain text, wrap it
+      if (html.length > 50) {
+        return `<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${taskDescription}</title><style>*{box-sizing:border-box}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:960px;margin:40px auto;padding:20px;background:#f5f6fa;color:#1a1d2e}h1{background:linear-gradient(135deg,#5b52e8,#3a7bd5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2em;margin-bottom:24px;padding-bottom:12px;border-bottom:2px solid #dde1f0}.content{background:#fff;border-radius:12px;padding:32px;box-shadow:0 2px 12px rgba(0,0,0,0.08);white-space:pre-wrap;line-height:1.8}</style></head><body><h1>${taskDescription}</h1><div class="content">${html.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div></body></html>`;
+      }
+
+      return null;
+    } catch (e) {
+      this._notify({ type: 'AGENT_THOUGHT', content: `HTML oluşturma hatası: ${e.message}` });
+      return null;
+    }
   }
 
   // ---- Tool Execution ----
