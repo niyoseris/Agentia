@@ -591,6 +591,11 @@ export class AgentCore {
     const log = [];
     let iterations = 0;
 
+    // File tracking — ensure file_open is always called when a file was created
+    let activeFileKey = null;   // fileKey from the most recent file_create call
+    let fileUpdateCount = 0;    // how many file_update calls have been made
+    let fileOpened = false;     // whether file_open was called
+
     this._notify({ type: 'TASK_START', task: taskDescription });
 
     while (iterations < this.maxToolIterations) {
@@ -602,6 +607,17 @@ export class AgentCore {
           log, messages, success: false
         }).catch(() => {});
         return { success: false, error: 'Durduruldu', log, messages };
+      }
+
+      // ── Periodic file reminder ──────────────────────────────────────────
+      // Every 12 iterations: if a file was created but not yet updated/opened,
+      // inject a reminder so the agent doesn't forget about it.
+      if (activeFileKey && iterations > 0 && iterations % 12 === 0 && !fileOpened) {
+        const reminder = fileUpdateCount === 0
+          ? `[REMINDER] You created a file (fileKey: "${activeFileKey}") but have NOT called file_update yet. You must call file_update with all the content you've gathered, then call file_open.`
+          : `[REMINDER] You created a file (fileKey: "${activeFileKey}") but have NOT called file_open yet. Call file_open("${activeFileKey}") as your final step.`;
+        messages.push({ role: 'user', content: reminder });
+        this._notify({ type: 'AGENT_THOUGHT', content: reminder });
       }
 
       iterations++;
@@ -624,25 +640,45 @@ export class AgentCore {
 
       messages.push(assistantMsg);
 
-      // No tool calls — task complete
+      // No tool calls — task reaching completion
       if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
         let result = assistantMsg.content || '';
 
-        // If LLM returned empty content, force a summary response
+        // ── Auto-open file if agent forgot ──────────────────────────────────
+        // If a file was created but file_open was never called, do it now
+        if (activeFileKey && !fileOpened) {
+          this._notify({ type: 'AGENT_THOUGHT', content: `⚠ Dosya açılmadı, otomatik açılıyor (${activeFileKey})...` });
+          try {
+            // If file has content but wasn't updated, prompt agent to update first
+            if (fileUpdateCount === 0 && result.trim()) {
+              // Use the text result as file content — update the skeleton with it
+              await this._bgMsg('FILE_UPDATE', {
+                fileKey: activeFileKey,
+                content: `<!DOCTYPE html><html lang="tr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agentia Report</title><style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:900px;margin:40px auto;padding:20px;background:#f5f6fa;color:#1a1d2e}h1{background:linear-gradient(135deg,#5b52e8,#3a7bd5);-webkit-background-clip:text;-webkit-text-fill-color:transparent;font-size:2em;margin-bottom:20px}p,li{line-height:1.8;margin:8px 0}.content{background:#fff;border-radius:12px;padding:30px;box-shadow:0 2px 12px rgba(0,0,0,0.08);white-space:pre-wrap}</style></head><body><h1>${taskDescription}</h1><div class="content">${result.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div></body></html>`
+              });
+            }
+            await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
+            fileOpened = true;
+            this._notify({ type: 'TOOL_CALL', tool: 'file_open', args: { fileKey: activeFileKey } });
+            this._notify({ type: 'TOOL_RESULT', tool: 'file_open', result: { opened: true, auto: true } });
+          } catch {}
+        }
+
+        // ── Empty result fallback ────────────────────────────────────────────
         if (!result.trim() && iterations > 1) {
           this._notify({ type: 'AGENT_THOUGHT', content: 'Sonuç boş, özet isteniyor...' });
+          const fileHint = activeFileKey
+            ? ` You created a file with fileKey="${activeFileKey}". Call file_update with your findings and file_open to display it.`
+            : '';
           messages.push({
             role: 'user',
-            content: 'Please write your final answer now. Summarize what you found or did, with all details. If you were supposed to create a file, call create_file now.'
+            content: `Please provide your final answer now. Summarize all findings in detail.${fileHint}`
           });
           const retryRes = await fetch(`${this.apiBase}/api/chat`, {
             method: 'POST',
             headers: this._headers(),
             body: JSON.stringify({
-              model: this.model,
-              messages,
-              tools: AGENT_TOOLS,
-              stream: false,
+              model: this.model, messages, tools: AGENT_TOOLS, stream: false,
               options: { temperature: 0.2, num_predict: this.maxTokens }
             })
           });
@@ -650,21 +686,18 @@ export class AgentCore {
             const retryData = await retryRes.json();
             const retryMsg = retryData.message;
             messages.push(retryMsg);
-            // If retry also has tool calls, process them too
-            if (retryMsg.tool_calls && retryMsg.tool_calls.length > 0) {
+            if (retryMsg.tool_calls?.length > 0) {
               for (const tc of retryMsg.tool_calls) {
                 const tName = tc.function?.name;
                 const tArgs = tc.function?.arguments || {};
                 this._notify({ type: 'TOOL_CALL', tool: tName, args: tArgs });
                 let tResult;
-                try {
-                  tResult = await this._executeTool(tName, tArgs, tabId);
-                } catch (e) {
-                  tResult = { error: e.message };
-                }
-                const tSanitized = this._sanitizeToolResult(tName, tResult);
-                this._notify({ type: 'TOOL_RESULT', tool: tName, result: tSanitized });
-                messages.push({ role: 'tool', content: JSON.stringify(tSanitized) });
+                try { tResult = await this._executeTool(tName, tArgs, tabId); }
+                catch (e) { tResult = { error: e.message }; }
+                const tSan = this._sanitizeToolResult(tName, tResult);
+                this._notify({ type: 'TOOL_RESULT', tool: tName, result: tSan });
+                messages.push({ role: 'tool', content: JSON.stringify(tSan) });
+                if (tName === 'file_open') fileOpened = true;
               }
               result = retryMsg.content || '(dosya oluşturuldu)';
             } else {
@@ -675,13 +708,8 @@ export class AgentCore {
 
         log.push({ type: 'final', content: result });
         this._notify({ type: 'TASK_COMPLETE', result });
-        // Auto-save to task history
         this._bgMsg('SAVE_TASK_HISTORY', {
-          task: taskDescription,
-          result,
-          log,
-          messages,
-          success: true
+          task: taskDescription, result, log, messages, success: true
         }).catch(() => {});
         return { success: true, result, log, messages };
       }
@@ -702,17 +730,29 @@ export class AgentCore {
           const sanitized = this._sanitizeToolResult(toolName, toolResult);
           log.push({ type: 'tool_result', tool: toolName, result: sanitized });
           this._notify({ type: 'TOOL_RESULT', tool: toolName, result: sanitized });
+
+          // ── Track file operations ──────────────────────────────────────────
+          if (toolName === 'file_create' && sanitized.fileKey) {
+            activeFileKey = sanitized.fileKey;
+            fileUpdateCount = 0;
+            fileOpened = false;
+          } else if (toolName === 'file_update') {
+            fileUpdateCount++;
+          } else if (toolName === 'file_open') {
+            fileOpened = true;
+          } else if (toolName === 'create_file' && sanitized.fileKey) {
+            // create_file opens automatically, treat as opened
+            activeFileKey = sanitized.fileKey;
+            fileOpened = true;
+          }
+
+          messages.push({ role: 'tool', content: JSON.stringify(sanitized) });
         } catch (err) {
           toolResult = { error: err.message };
           log.push({ type: 'tool_error', tool: toolName, error: err.message });
           this._notify({ type: 'TOOL_ERROR', tool: toolName, error: err.message });
+          messages.push({ role: 'tool', content: JSON.stringify({ error: err.message }) });
         }
-
-        // Append tool result as 'tool' role message — sanitize first to avoid context overflow
-        messages.push({
-          role: 'tool',
-          content: JSON.stringify(this._sanitizeToolResult(toolName, toolResult))
-        });
 
         // Check abort signal after each tool execution too
         if (signal?.aborted) {
@@ -726,12 +766,19 @@ export class AgentCore {
       }
     }
 
+    // Max iterations — still auto-open file if one was created
+    if (activeFileKey && !fileOpened) {
+      try {
+        await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
+        this._notify({ type: 'TOOL_CALL', tool: 'file_open', args: { fileKey: activeFileKey } });
+        this._notify({ type: 'TOOL_RESULT', tool: 'file_open', result: { opened: true, auto: true } });
+      } catch {}
+    }
+
     this._bgMsg('SAVE_TASK_HISTORY', {
       task: taskDescription,
       result: 'Max iterasyon limitine ulaşıldı',
-      log,
-      messages,
-      success: false
+      log, messages, success: false
     }).catch(() => {});
     return { success: false, error: 'Max iterations reached', log, messages };
   }
