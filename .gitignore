@@ -1,0 +1,26 @@
+# Environment & Local Settings
+.env
+.env.local
+.claude/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Node/npm
+node_modules/
+package-lock.json
+npm-debug.log
+
+# IDE
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# Browser Extension Runtime
+*.crx
+*.pem
+
+# OS-specific
+*.log

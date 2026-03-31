@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentia</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <div class="logo">A</div>
+    <span class="header-title">Agentia</span>
+    <span class="model-badge" id="model-badge">—</span>
+    <div class="status-dot" id="status-dot" title="Ollama bağlantı durumu"></div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="chat">💬 Sohbet</button>
+    <button class="tab-btn" data-tab="task">⚡ Görev</button>
+    <button class="tab-btn" data-tab="history">🕓 Geçmiş</button>
+    <button class="tab-btn" data-tab="recordings">⏺ Kayıtlar</button>
+    <button class="tab-btn" data-tab="settings">⚙️ Ayarlar</button>
+  </div>
+
+  <!-- ===== CHAT TAB ===== -->
+  <div class="tab-panel active" id="tab-chat">
+    <div class="messages" id="messages">
+      <div class="message assistant">
+        <div class="message-bubble">
+          Merhaba! Ben Agentia. Tarayıcını kontrol etmeme, işlem kaydetmene, tekrarlamana ve otonom görevler çalıştırmana yardımcı olabilirim. Ne yapmak istersin?
+        </div>
+      </div>
+    </div>
+
+    <div class="chat-input-area">
+      <textarea
+        class="chat-input"
+        id="chat-input"
+        placeholder="Mesaj yaz... (Enter: gönder, Shift+Enter: yeni satır)"
+        rows="1"
+      ></textarea>
+      <button class="send-btn" id="send-btn" title="Gönder">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="22" y1="2" x2="11" y2="13"></line>
+          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- ===== TASK TAB ===== -->
+  <div class="tab-panel" id="tab-task">
+    <div class="task-panel">
+
+      <!-- New task input area — hidden when a session is active -->
+      <div id="task-new-area">
+        <textarea
+          class="task-input"
+          id="task-input"
+          placeholder="Görevi tanımla... Örn: 'Google'da Chrome extension ara ve ilk sonucu aç' veya 'Bu sayfadaki tüm linkleri bul'"
+        ></textarea>
+
+        <div style="display:flex; gap:8px; align-items:center;">
+          <button class="btn btn-primary" id="run-task-btn">▶ Görevi Çalıştır</button>
+          <button class="btn btn-secondary" id="stop-task-btn" style="display:none;">■ Durdur</button>
+          <div id="task-status" style="font-size:12px; color:var(--text3);"></div>
+        </div>
+      </div>
+
+      <!-- Session header — shown when a task session is active/done -->
+      <div id="task-session-header" style="display:none;">
+        <div class="task-session-info">
+          <div class="task-session-title" id="task-session-title"></div>
+          <button class="btn btn-secondary btn-sm" id="task-new-btn">＋ Yeni Görev</button>
+        </div>
+        <div style="display:flex; gap:8px; align-items:center; padding: 0 12px 8px;">
+          <button class="btn btn-secondary" id="stop-task-btn-2" style="display:none;">■ Durdur</button>
+          <div id="task-status-2" style="font-size:12px; color:var(--text3);"></div>
+        </div>
+      </div>
+
+      <div class="task-log" id="task-log">
+        <div class="log-entry info">Görev günlüğü burada görünecek...</div>
+      </div>
+
+      <!-- Continuation input — shown after task finishes -->
+      <div id="task-continue-area" style="display:none;">
+        <div class="task-continue-hint" id="task-continue-hint"></div>
+        <div class="task-continue-input-row">
+          <textarea
+            class="task-continue-input"
+            id="task-continue-input"
+            placeholder="Devam talimatı ver... (Örn: 'Şimdi her birinin fiyatını da bul')"
+            rows="1"
+          ></textarea>
+          <button class="btn btn-primary task-continue-send" id="task-continue-btn" title="Devam Et">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ===== HISTORY TAB ===== -->
+  <div class="tab-panel" id="tab-history">
+    <div class="history-panel">
+      <div class="history-toolbar">
+        <span style="font-size:12px; color:var(--text2); font-weight:600;">Tamamlanan Görevler</span>
+        <button class="btn btn-danger btn-sm" id="clear-history-btn">Tümünü Sil</button>
+      </div>
+      <div class="history-list" id="history-list">
+        <div class="empty-state">
+          <div class="empty-icon">🕓</div>
+          <div>Henüz görev geçmişi yok</div>
+          <div style="font-size:11px;">Bir görev çalıştırdığında burada görünecek</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== RECORDINGS TAB ===== -->
+  <div class="tab-panel" id="tab-recordings">
+    <div class="recordings-panel">
+      <div class="rec-toolbar">
+        <button class="btn btn-record" id="rec-toggle-btn">
+          ⏺ Kayıt Başlat
+        </button>
+        <input
+          type="text"
+          class="form-input"
+          id="rec-name-input"
+          placeholder="Kayıt adı (opsiyonel)"
+          style="flex:1;"
+        >
+        <button class="btn btn-secondary btn-sm" id="refresh-recs-btn" title="Yenile">↻</button>
+      </div>
+
+      <div class="adaptive-toggle" style="margin: 8px 12px 0;">
+        <label class="toggle" title="Adaptif modda ajan, element bulunamadığında otomatik alternatif arar">
+          <input type="checkbox" id="adaptive-toggle">
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+        <span>Adaptif Tekrar</span>
+        <span style="color:var(--text3); font-size:11px; margin-left:4px;">(AI ile uyarlanmış)</span>
+      </div>
+
+      <div class="rec-list" id="rec-list">
+        <div class="empty-state">
+          <div class="empty-icon">⏺</div>
+          <div>Henüz kayıt yok</div>
+          <div style="font-size:11px;">Kayıt başlatmak için yukarıdaki butonu kullan</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== SETTINGS TAB ===== -->
+  <div class="tab-panel" id="tab-settings">
+    <div class="settings-panel">
+
+      <div class="settings-section">
+        <div class="settings-title">Ollama Bağlantısı</div>
+
+        <div class="toggle-row" style="margin-bottom:4px;">
+          <span class="form-label">Cloud Modu (ollama.com)</span>
+          <label class="toggle">
+            <input type="checkbox" id="use-cloud" checked>
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+
+        <div id="local-settings" style="display:none;">
+          <div class="form-row">
+            <label class="form-label">Yerel Ollama URL</label>
+            <input type="text" class="form-input" id="ollama-url" value="http://localhost:11434" placeholder="http://localhost:11434">
+          </div>
+        </div>
+
+        <div id="cloud-settings">
+          <div class="form-row">
+            <label class="form-label">API Key
+              <span style="color:var(--text3); font-weight:400;"> — ollama.com/settings/keys</span>
+            </label>
+            <input type="password" class="form-input" id="api-key" placeholder="sk-...">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Model</label>
+          <input type="text" class="form-input" id="model-input" placeholder="llama3.2, mistral, gemma3, qwen2.5...">
+        </div>
+
+        <button class="btn btn-secondary btn-sm" id="test-connection-btn" style="width:fit-content;">
+          Bağlantıyı Test Et
+        </button>
+        <div id="connection-result" style="font-size:12px;"></div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Model Parametreleri</div>
+
+        <div class="form-row">
+          <label class="form-label">Sıcaklık (Temperature)</label>
+          <div class="range-row">
+            <input type="range" class="form-range" id="temperature" min="0" max="1" step="0.1" value="0.7">
+            <span class="range-val" id="temperature-val">0.7</span>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Max Token</label>
+          <input type="number" class="form-input" id="max-tokens" value="4096" min="256" max="32768" step="256">
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Max Iterasyon <span style="color:var(--text3);font-weight:400">(otonom görev adım limiti)</span></label>
+          <input type="number" class="form-input" id="max-iterations" value="60" min="10" max="200" step="10">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Sistem Prompt</div>
+        <textarea
+          class="form-textarea"
+          id="system-prompt"
+          placeholder="Opsiyonel: agent davranışını özelleştir..."
+        ></textarea>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Otomasyon</div>
+
+        <div class="form-row">
+          <label class="form-label">Tekrar Gecikmesi (ms)</label>
+          <input type="number" class="form-input" id="replay-delay" value="500" min="100" max="5000" step="100">
+        </div>
+
+        <div class="toggle-row">
+          <span class="form-label">Otomatik Kayıt</span>
+          <label class="toggle">
+            <input type="checkbox" id="auto-record">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Model Yükle</div>
+        <div style="display:flex; gap:8px;">
+          <input type="text" class="form-input" id="pull-model-input" placeholder="llama3.2, mistral, gemma3...">
+          <button class="btn btn-secondary" id="pull-model-btn">İndir</button>
+        </div>
+        <div id="pull-progress" style="font-size:12px; color:var(--text2);"></div>
+      </div>
+
+      <button class="btn btn-primary" id="save-settings-btn" style="width:100%;">
+        ✓ Ayarları Kaydet
+      </button>
+
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

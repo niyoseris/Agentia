@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agentia Viewer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #f5f6fa;
+      color: #1a1d2e;
+      min-height: 100vh;
+    }
+    #toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #fff;
+      border-bottom: 1px solid #dde1f0;
+      padding: 8px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .logo {
+      width: 20px; height: 20px;
+      background: linear-gradient(135deg, #5b52e8, #3a7bd5);
+      border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 800; font-size: 11px; color: white; flex-shrink: 0;
+    }
+    #file-title { font-weight: 600; font-size: 14px; flex: 1; color: #1a1d2e; }
+    #file-meta { font-size: 11px; color: #8890b0; }
+    .btn {
+      padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+      font-size: 12px; font-weight: 600; font-family: inherit;
+    }
+    .btn-secondary {
+      background: #eef0f7; color: #4a5080; border: 1px solid #dde1f0;
+    }
+    .btn-secondary:hover { border-color: #5b52e8; color: #5b52e8; }
+    #content-area { padding: 24px; max-width: 900px; margin: 0 auto; }
+    /* Text/JSON content */
+    pre {
+      background: #fff; border: 1px solid #dde1f0; border-radius: 8px;
+      padding: 20px; overflow-x: auto; font-size: 13px; line-height: 1.6;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    /* Markdown-like rendering */
+    .md h1 { font-size: 24px; margin: 16px 0 8px; border-bottom: 2px solid #dde1f0; padding-bottom: 8px; }
+    .md h2 { font-size: 19px; margin: 14px 0 6px; color: #2c2f4a; }
+    .md h3 { font-size: 15px; margin: 12px 0 4px; color: #4a5080; }
+    .md p { margin: 8px 0; line-height: 1.7; }
+    .md ul, .md ol { margin: 8px 0 8px 20px; }
+    .md li { margin: 4px 0; line-height: 1.6; }
+    .md table { width: 100%; border-collapse: collapse; margin: 12px 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .md th { background: #5b52e8; color: white; padding: 10px 14px; text-align: left; font-size: 13px; }
+    .md td { padding: 9px 14px; border-bottom: 1px solid #eef0f7; font-size: 13px; }
+    .md tr:last-child td { border-bottom: none; }
+    .md tr:hover td { background: #f8f9ff; }
+    .md code { background: #eef0f7; padding: 1px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; }
+    .md pre { background: #1a1d2e; color: #e8eaf6; border: none; padding: 16px; border-radius: 8px; }
+    .md blockquote { border-left: 3px solid #5b52e8; padding: 8px 16px; background: rgba(91,82,232,0.06); margin: 10px 0; border-radius: 0 6px 6px 0; color: #4a5080; }
+    .md strong { font-weight: 700; }
+    .md em { font-style: italic; color: #4a5080; }
+    #iframe-container { width: 100%; height: calc(100vh - 52px); border: none; }
+    iframe { width: 100%; height: 100%; border: none; }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <div class="logo">A</div>
+    <span id="file-title">Dosya</span>
+    <span id="file-meta"></span>
+    <button class="btn btn-secondary" onclick="copyContent()">Kopyala</button>
+    <button class="btn btn-secondary" onclick="downloadFile()">İndir</button>
+    <button class="btn btn-secondary" onclick="window.close()">Kapat</button>
+  </div>
+  <div id="content-area"></div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const fileKey = params.get('key');
+
+    let rawContent = '';
+    let fileType = 'text';
+    let fileName = 'dosya';
+
+    async function load() {
+      if (!fileKey) {
+        document.getElementById('content-area').innerHTML = '<p style="color:#d63031;padding:24px">Dosya bulunamadı.</p>';
+        return;
+      }
+
+      const data = await chrome.storage.local.get(fileKey);
+      const file = data[fileKey];
+
+      if (!file) {
+        document.getElementById('content-area').innerHTML = '<p style="color:#d63031;padding:24px">Dosya silinmiş veya bulunamadı.</p>';
+        return;
+      }
+
+      rawContent = file.content;
+      fileType = file.type || 'text';
+      fileName = file.name || 'dosya';
+
+      document.title = `Agentia — ${fileName}`;
+      document.getElementById('file-title').textContent = fileName;
+      document.getElementById('file-meta').textContent =
+        new Date(file.created).toLocaleString('tr-TR') + ' · ' + fileType.toUpperCase();
+
+      render();
+    }
+
+    function render() {
+      const area = document.getElementById('content-area');
+
+      if (fileType === 'html') {
+        // Render HTML in full page (replace toolbar content with iframe)
+        area.innerHTML = '';
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'width:100%;height:calc(100vh - 52px);border:none;';
+        iframe.srcdoc = rawContent;
+        area.appendChild(iframe);
+        return;
+      }
+
+      if (fileType === 'markdown' || fileType === 'md') {
+        area.innerHTML = `<div class="md">${markdownToHtml(rawContent)}</div>`;
+        return;
+      }
+
+      if (fileType === 'json') {
+        try {
+          const pretty = JSON.stringify(JSON.parse(rawContent), null, 2);
+          area.innerHTML = `<pre>${escHtml(pretty)}</pre>`;
+        } catch {
+          area.innerHTML = `<pre>${escHtml(rawContent)}</pre>`;
+        }
+        return;
+      }
+
+      // Default: plain text — but try markdown-like rendering
+      area.innerHTML = `<div class="md">${markdownToHtml(rawContent)}</div>`;
+    }
+
+    function markdownToHtml(md) {
+      return md
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        // Tables
+        .replace(/\|(.+)\|\n\|[-| :]+\|\n((?:\|.+\|\n?)*)/g, (_, header, rows) => {
+          const ths = header.split('|').filter(s => s.trim()).map(s => `<th>${s.trim()}</th>`).join('');
+          const trs = rows.trim().split('\n').map(row => {
+            const tds = row.split('|').filter(s => s.trim()).map(s => `<td>${s.trim()}</td>`).join('');
+            return `<tr>${tds}</tr>`;
+          }).join('');
+          return `<table><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
+        })
+        // Headings
+        .replace(/^### (.+)$/gm, '<h3>$1</h3>')
+        .replace(/^## (.+)$/gm, '<h2>$1</h2>')
+        .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+        // Bold/italic
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        // Blockquote
+        .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
+        // Code
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        // Lists
+        .replace(/^- (.+)$/gm, '<li>$1</li>')
+        .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
+        .replace(/(<li>.*<\/li>\n?)+/g, s => `<ul>${s}</ul>`)
+        // Paragraphs
+        .replace(/\n\n/g, '</p><p>')
+        .replace(/^(?!<[hult])(.+)$/gm, (m) => m.startsWith('<') ? m : m)
+        .replace(/^([^<\n].+)$/gm, '<p>$1</p>');
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+
+    function copyContent() {
+      navigator.clipboard.writeText(rawContent).then(() => {
+        const btn = document.querySelector('button[onclick="copyContent()"]');
+        btn.textContent = '✓ Kopyalandı';
+        setTimeout(() => btn.textContent = 'Kopyala', 2000);
+      });
+    }
+
+    function downloadFile() {
+      const ext = fileType === 'html' ? 'html' : fileType === 'json' ? 'json' : fileType === 'markdown' ? 'md' : 'txt';
+      const mime = fileType === 'html' ? 'text/html' : fileType === 'json' ? 'application/json' : 'text/plain';
+      const blob = new Blob([rawContent], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${fileName}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    load();
+  </script>
+</body>
+</html>
