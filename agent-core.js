@@ -391,7 +391,9 @@ Rules:
 - For contenteditable elements (Twitter/X tweet box, Gmail compose, etc.): dom_type handles these automatically — just use the correct selector (e.g. [contenteditable="true"] or [data-testid="tweetTextarea_0"] or .public-DraftEditor-content)
 - On Twitter/X to post a tweet: (1) dom_click the contenteditable box, (2) wait 500ms, (3) dom_type the text, (4) wait 500ms, (5) use dom_get_text on [data-testid="tweetButtonInline"] to confirm it's enabled (not disabled), (6) dom_click [data-testid="tweetButtonInline"]
 - After clicking Post on Twitter, wait 2000ms then use dom_exists on a success indicator OR check page_get_info to confirm; never assume success without verifying
-- If typing into a field seems to have no effect, try dom_click on the element first, wait 300ms, then dom_type again`;
+- If typing into a field seems to have no effect, try dom_click on the element first, wait 300ms, then dom_type again
+- IMPORTANT — create_file: When user asks for a report, list, page, document or file, you MUST call create_file with the FULL content. Do NOT say "I will create it" or "creating now" — call the tool immediately. Use type "html" for rich visual output with images, tables and styling. Always include complete content in the create_file call, not a placeholder.
+- When researching, collect ALL data first, THEN call create_file ONCE with everything. Do not call create_file with partial data.`;
 
 export class AgentCore {
   constructor(ollamaBase) {
@@ -538,7 +540,53 @@ export class AgentCore {
 
       // No tool calls — task complete
       if (!assistantMsg.tool_calls || assistantMsg.tool_calls.length === 0) {
-        const result = assistantMsg.content || '';
+        let result = assistantMsg.content || '';
+
+        // If LLM returned empty content, force a summary response
+        if (!result.trim() && iterations > 1) {
+          this._notify({ type: 'AGENT_THOUGHT', content: 'Sonuç boş, özet isteniyor...' });
+          messages.push({
+            role: 'user',
+            content: 'Please write your final answer now. Summarize what you found or did, with all details. If you were supposed to create a file, call create_file now.'
+          });
+          const retryRes = await fetch(`${this.apiBase}/api/chat`, {
+            method: 'POST',
+            headers: this._headers(),
+            body: JSON.stringify({
+              model: this.model,
+              messages,
+              tools: AGENT_TOOLS,
+              stream: false,
+              options: { temperature: 0.2, num_predict: this.maxTokens }
+            })
+          });
+          if (retryRes.ok) {
+            const retryData = await retryRes.json();
+            const retryMsg = retryData.message;
+            messages.push(retryMsg);
+            // If retry also has tool calls, process them too
+            if (retryMsg.tool_calls && retryMsg.tool_calls.length > 0) {
+              for (const tc of retryMsg.tool_calls) {
+                const tName = tc.function?.name;
+                const tArgs = tc.function?.arguments || {};
+                this._notify({ type: 'TOOL_CALL', tool: tName, args: tArgs });
+                let tResult;
+                try {
+                  tResult = await this._executeTool(tName, tArgs, tabId);
+                } catch (e) {
+                  tResult = { error: e.message };
+                }
+                const tSanitized = this._sanitizeToolResult(tName, tResult);
+                this._notify({ type: 'TOOL_RESULT', tool: tName, result: tSanitized });
+                messages.push({ role: 'tool', content: JSON.stringify(tSanitized) });
+              }
+              result = retryMsg.content || '(dosya oluşturuldu)';
+            } else {
+              result = retryMsg.content || '';
+            }
+          }
+        }
+
         log.push({ type: 'final', content: result });
         this._notify({ type: 'TASK_COMPLETE', result });
         // Auto-save to task history

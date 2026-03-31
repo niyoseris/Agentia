@@ -7,6 +7,7 @@ import { ActionStore } from './action-store.js';
 const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
 let actionStore = null;
+let initPromise = null; // Tracks ongoing initialization
 
 // Initialize on startup
 async function init() {
@@ -71,7 +72,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleMessage(message, sender, sendResponse) {
   const { type, payload = {} } = message;
 
-  // Guard: drop messages that arrive before init() finishes
+  // If init is still running, wait for it (up to 8s) before handling
+  if (initPromise && (!agentCore || !actionStore)) {
+    try {
+      await Promise.race([
+        initPromise,
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Init timeout')), 8000))
+      ]);
+    } catch {}
+  }
+
   if (!agentCore || !actionStore) {
     sendResponse({ success: false, error: 'Extension initializing, please retry' });
     return;
@@ -779,5 +789,5 @@ chrome.action.onClicked.addListener((tab) => {
 
 chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
 
-// Start
-init().catch(console.error);
+// Start — keep the promise so message handler can await it
+initPromise = init().catch(console.error);

@@ -17,6 +17,23 @@ let chatHistory = []; // { role, content }
 let taskSessionMessages = null;  // Full message history of the current task session
 let taskSessionName = '';        // Original task description of the session
 
+// Background message with auto-retry on "initializing" error
+async function bgWithRetry(type, payload, maxRetries = 4, delayMs = 1500) {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await bg(type, payload);
+    } catch (err) {
+      const isInit = err.message?.includes('initializing') || err.message?.includes('retry');
+      if (isInit && attempt < maxRetries - 1) {
+        taskLog('info', `⟳ Uzantı başlatılıyor… (${attempt + 1}/${maxRetries - 1})`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 // ---- Init ----
 document.addEventListener('DOMContentLoaded', async () => {
   setupTabs();
@@ -414,7 +431,7 @@ async function runTask() {
   taskLog('info', `Görev başlatıldı: ${taskText}`);
 
   try {
-    const result = await bg('AGENT_RUN_TASK', {
+    const result = await bgWithRetry('AGENT_RUN_TASK', {
       task: taskText,
       tabId: currentTabId,
       messages: null
@@ -461,7 +478,7 @@ async function continueTask() {
   taskLog('info', `↩ Devam talimatı: ${text}`);
 
   try {
-    const result = await bg('AGENT_RUN_TASK', {
+    const result = await bgWithRetry('AGENT_RUN_TASK', {
       task: text,
       tabId: currentTabId,
       messages: taskSessionMessages  // Pass full prior context
