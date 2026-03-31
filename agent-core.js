@@ -358,42 +358,117 @@ const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'create_file',
-      description: 'Create a file and display it in a new browser tab. Use this to present results, reports, tables, or any structured content to the user.',
+      description: 'Quick shortcut: create a file AND immediately open it in a new tab in one step. Use this only for final one-shot outputs. For progressive research tasks use file_create + file_update + file_open instead.',
       parameters: {
         type: 'object',
         required: ['name', 'content'],
         properties: {
-          name: { type: 'string', description: 'File name (without extension), e.g. "Amazon Search Results"' },
-          content: { type: 'string', description: 'File content as a string' },
+          name: { type: 'string', description: 'File name, e.g. "Search Results"' },
+          content: { type: 'string', description: 'Full file content' },
           type: {
             type: 'string',
             enum: ['text', 'markdown', 'html', 'json'],
-            description: 'Content type: markdown for formatted reports, html for rich pages, json for data, text for plain'
+            description: 'Content type'
           }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_create',
+      description: 'Create a new file in storage and return its fileKey. Use at the START of any research/report task to establish the page skeleton. Returns { fileKey } — save this for file_update and file_open calls.',
+      parameters: {
+        type: 'object',
+        required: ['name', 'content', 'type'],
+        properties: {
+          name: { type: 'string', description: 'Display name, e.g. "Europe Hidden Gems Guide"' },
+          content: { type: 'string', description: 'Initial HTML/text content — can be a skeleton that you will fill in with file_update calls' },
+          type: {
+            type: 'string',
+            enum: ['html', 'markdown', 'json', 'text'],
+            description: 'Use html for rich visual pages with images and styling'
+          }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_update',
+      description: 'Replace the content of a previously created file. Call this progressively as you research — each call replaces the full content, so always include all accumulated content. Use to build the page incrementally.',
+      parameters: {
+        type: 'object',
+        required: ['fileKey', 'content'],
+        properties: {
+          fileKey: { type: 'string', description: 'The fileKey returned by file_create' },
+          content: { type: 'string', description: 'New complete content (replaces previous version entirely)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_open',
+      description: 'Open a previously created/updated file in a new browser tab. Call this as the LAST step after all file_update calls are done.',
+      parameters: {
+        type: 'object',
+        required: ['fileKey'],
+        properties: {
+          fileKey: { type: 'string', description: 'The fileKey returned by file_create' }
         }
       }
     }
   }
 ];
 
-const AGENT_SYSTEM_PROMPT = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient — minimize tool calls.
+const AGENT_SYSTEM_PROMPT = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient and thorough.
 
-Rules:
+## Core Rules
 - After tab_navigate, always wait 1500ms before interacting
-- Call dom_get_summary ONCE per page to understand the layout, then act — don't call it repeatedly
-- For product listings: use dom_query_all with selectors like "[data-component-type='s-search-result'] .a-size-base-plus" for names, ".a-price .a-offscreen" for prices
-- To click a product link: use the href from dom_query_all results with tab_navigate instead of dom_click
-- Extract data from multiple elements in one dom_extract call using multiple fields
+- Call dom_get_summary ONCE per page to understand the layout — do not repeat it
 - Never call page_get_info and dom_get_summary on the same page — pick one
-- When you have enough data to answer, stop and respond — don't keep browsing
-- For research tasks: collect data from the listing page directly, don't open each product individually unless necessary
-- Be concise in your final response — present findings as a formatted list
-- For contenteditable elements (Twitter/X tweet box, Gmail compose, etc.): dom_type handles these automatically — just use the correct selector (e.g. [contenteditable="true"] or [data-testid="tweetTextarea_0"] or .public-DraftEditor-content)
-- On Twitter/X to post a tweet: (1) dom_click the contenteditable box, (2) wait 500ms, (3) dom_type the text, (4) wait 500ms, (5) use dom_get_text on [data-testid="tweetButtonInline"] to confirm it's enabled (not disabled), (6) dom_click [data-testid="tweetButtonInline"]
-- After clicking Post on Twitter, wait 2000ms then use dom_exists on a success indicator OR check page_get_info to confirm; never assume success without verifying
-- If typing into a field seems to have no effect, try dom_click on the element first, wait 300ms, then dom_type again
-- IMPORTANT — create_file: When user asks for a report, list, page, document or file, you MUST call create_file with the FULL content. Do NOT say "I will create it" or "creating now" — call the tool immediately. Use type "html" for rich visual output with images, tables and styling. Always include complete content in the create_file call, not a placeholder.
-- When researching, collect ALL data first, THEN call create_file ONCE with everything. Do not call create_file with partial data.`;
+- For links/products: use href values from dom_query_all with tab_navigate instead of dom_click
+- When you have enough data to answer a simple question, stop browsing and respond
+
+## File & Report Tasks (MANDATORY PATTERN)
+When user asks for a report, guide, list, HTML page, or any document — follow this exact flow:
+
+1. **file_create** — Call IMMEDIATELY as the first step. Create an HTML skeleton with the page title, CSS styling, and empty sections. Save the returned fileKey.
+2. **Research** — Browse the web, extract data, collect content.
+3. **file_update** — After each source or major finding, call file_update with the FULL accumulated HTML (includes everything gathered so far + new items). Do this progressively — do not wait until the end.
+4. **file_open** — Call as the VERY LAST step when research is complete to open the finished page.
+
+Example for "research X and make a page":
+- file_create → { fileKey: "agentia_file_123" }  ← skeleton HTML
+- tab_navigate → research source 1
+- file_update(fileKey, HTML with item 1)
+- tab_navigate → research source 2
+- file_update(fileKey, HTML with items 1+2)
+- ... continue for all sources ...
+- file_update(fileKey, final complete HTML)
+- file_open(fileKey)  ← opens the finished page
+
+NEVER say "I will create the file now" — call the tool. NEVER skip file_open at the end.
+
+## HTML File Quality
+When creating HTML reports:
+- Use inline CSS with a beautiful modern design (gradient headers, card grid layout, shadows)
+- For location/product/travel pages: each item gets a card with image (use real URLs from research), title, description, and details
+- Include a page header with title and subtitle
+- Images: use <img src="URL"> with real image URLs found during research (from unsplash, wikipedia, travel sites, etc.)
+- Make it visually rich — this is what the user will see in their browser
+
+## Twitter/X
+- (1) dom_click the contenteditable box, (2) wait 500ms, (3) dom_type text, (4) wait 500ms, (5) dom_click [data-testid="tweetButtonInline"], (6) wait 2000ms, (7) verify with dom_exists
+- contenteditable elements (Twitter, Gmail etc.) work fine with dom_type
+
+## Other
+- For product listings: dom_query_all with "[data-component-type='s-search-result'] .a-size-base-plus" for names
+- If typing has no effect: dom_click the field first, wait 300ms, then dom_type`;
 
 export class AgentCore {
   constructor(ollamaBase) {
@@ -716,6 +791,22 @@ export class AgentCore {
           type: args.type || 'text'
         });
 
+      case 'file_create':
+        return this._bgMsg('FILE_CREATE', {
+          name: args.name,
+          content: args.content,
+          type: args.type || 'html'
+        });
+
+      case 'file_update':
+        return this._bgMsg('FILE_UPDATE', {
+          fileKey: args.fileKey,
+          content: args.content
+        });
+
+      case 'file_open':
+        return this._bgMsg('FILE_OPEN', { fileKey: args.fileKey });
+
       default:
         throw new Error(`Unknown tool: ${tool}`);
     }
@@ -724,6 +815,20 @@ export class AgentCore {
   // Sanitize tool results before sending to LLM — strip huge data
   _sanitizeToolResult(tool, result) {
     if (!result || typeof result !== 'object') return result;
+
+    // File tools: never send content back — just confirm with fileKey
+    if (tool === 'file_create') {
+      return { fileKey: result.fileKey, created: true };
+    }
+    if (tool === 'file_update') {
+      return { fileKey: result.fileKey, updated: true };
+    }
+    if (tool === 'file_open') {
+      return { opened: true, url: result.url };
+    }
+    if (tool === 'create_file') {
+      return { fileKey: result.fileKey, opened: true };
+    }
 
     // Screenshot: strip base64, just confirm it was taken
     if (tool === 'tab_screenshot') {

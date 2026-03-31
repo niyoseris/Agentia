@@ -219,6 +219,7 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'CREATE_FILE': {
+        // Quick shortcut: create + open in one step
         const fileKey = `agentia_file_${Date.now()}`;
         await chrome.storage.local.set({
           [fileKey]: {
@@ -231,6 +232,49 @@ async function handleMessage(message, sender, sendResponse) {
         const viewerUrl = chrome.runtime.getURL(`viewer.html?key=${fileKey}`);
         const tab = await chrome.tabs.create({ url: viewerUrl, active: true });
         sendResponse({ success: true, data: { fileKey, url: viewerUrl, tabId: tab.id } });
+        break;
+      }
+
+      case 'FILE_CREATE': {
+        // Create file in storage, return fileKey — does NOT open a tab
+        const fileKey = `agentia_file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        await chrome.storage.local.set({
+          [fileKey]: {
+            name: payload.name,
+            content: payload.content || '',
+            type: payload.type || 'html',
+            created: Date.now(),
+            updated: Date.now()
+          }
+        });
+        sendResponse({ success: true, data: { fileKey } });
+        break;
+      }
+
+      case 'FILE_UPDATE': {
+        // Update (replace) the content of an existing file
+        const existing = await chrome.storage.local.get(payload.fileKey);
+        if (!existing[payload.fileKey]) {
+          sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
+          break;
+        }
+        existing[payload.fileKey].content = payload.content;
+        existing[payload.fileKey].updated = Date.now();
+        await chrome.storage.local.set({ [payload.fileKey]: existing[payload.fileKey] });
+        sendResponse({ success: true, data: { fileKey: payload.fileKey, updated: true } });
+        break;
+      }
+
+      case 'FILE_OPEN': {
+        // Open an existing file in a new tab
+        const checkData = await chrome.storage.local.get(payload.fileKey);
+        if (!checkData[payload.fileKey]) {
+          sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
+          break;
+        }
+        const openUrl = chrome.runtime.getURL(`viewer.html?key=${payload.fileKey}`);
+        const openedTab = await chrome.tabs.create({ url: openUrl, active: true });
+        sendResponse({ success: true, data: { url: openUrl, tabId: openedTab.id } });
         break;
       }
 
