@@ -10,6 +10,25 @@ let actionStore = null;
 let initPromise = null; // Tracks ongoing initialization
 let currentTaskController = null; // AbortController for the running task
 
+// ── MV3 Service Worker Keepalive ──────────────────────────────────────────────
+// Chrome MV3 suspends service workers after ~30s of inactivity.
+// During a long-running task, we use a repeating alarm to prevent suspension.
+// The alarm handler just needs to exist — the act of firing keeps the SW alive.
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'agentia-keepalive') {
+    // No-op: alarm fires every 25s to keep service worker awake during tasks
+    console.log('[Agentia] keepalive ping, task running:', !!currentTaskController);
+  }
+});
+
+function startKeepalive() {
+  chrome.alarms.create('agentia-keepalive', { periodInMinutes: 0.4 }); // ~24s
+}
+
+function stopKeepalive() {
+  chrome.alarms.clear('agentia-keepalive');
+}
+
 // Initialize on startup
 async function init() {
   agentCore = new AgentCore(OLLAMA_BASE);
@@ -120,6 +139,9 @@ async function handleMessage(message, sender, sendResponse) {
         // Task lifecycle (TASK_COMPLETE / TASK_STOPPED) arrives via AGENT_EVENT notifications.
         sendResponse({ success: true, data: { started: true } });
 
+        // Keep service worker alive during the long-running task
+        startKeepalive();
+
         agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal)
           .catch((err) => {
             chrome.runtime.sendMessage({
@@ -127,7 +149,10 @@ async function handleMessage(message, sender, sendResponse) {
               data: { type: 'TASK_ERROR', error: err.message, messages: [] }
             }).catch(() => {});
           })
-          .finally(() => { currentTaskController = null; });
+          .finally(() => {
+            currentTaskController = null;
+            stopKeepalive();
+          });
         break;
       }
 

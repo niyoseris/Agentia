@@ -16,7 +16,8 @@
     "bookmarks",
     "downloads",
     "clipboardRead",
-    "clipboardWrite"
+    "clipboardWrite",
+    "alarms"
   ],
 
   "host_permissions": [
