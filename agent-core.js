@@ -425,7 +425,16 @@ const AGENT_TOOLS = [
   }
 ];
 
-const AGENT_SYSTEM_PROMPT = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient and thorough.
+// Base system prompt (date/time injected at runtime in runTask)
+const AGENT_SYSTEM_PROMPT_BASE = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient and thorough.
+
+## Current Information
+[DATE_TIME_INJECTED_HERE]
+
+IMPORTANT: Your knowledge has a cutoff date. For any recent events, current prices, latest products, trending topics, or time-sensitive information:
+- ALWAYS browse the web to get current data
+- Do NOT rely on your training data
+- Search for the latest news, reviews, and information
 
 ## Core Rules
 - tab_create and tab_navigate both wait for the page to fully load before returning — you do NOT need an extra wait() call after them. Go directly to DOM actions.
@@ -590,12 +599,19 @@ export class AgentCore {
   // signal: AbortController signal — abort() stops the loop between iterations
   async runTask(taskDescription, tabId, existingMessages = null, signal = null) {
     let messages;
+
+    // Inject current date/time into system prompt
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US');
+    const systemPrompt = AGENT_SYSTEM_PROMPT_BASE.replace('[DATE_TIME_INJECTED_HERE]', `Today's date: ${dateStr}\nCurrent time: ${timeStr}`);
+
     if (existingMessages && existingMessages.length > 0) {
       // Continue existing session — append new user turn
       messages = [...existingMessages, { role: 'user', content: taskDescription }];
     } else {
       messages = [
-        { role: 'system', content: AGENT_SYSTEM_PROMPT + (this.systemPrompt ? '\n\n' + this.systemPrompt : '') },
+        { role: 'system', content: systemPrompt + (this.systemPrompt ? '\n\n' + this.systemPrompt : '') },
         { role: 'user', content: taskDescription }
       ];
     }
@@ -1080,8 +1096,13 @@ export class AgentCore {
   }
 
   _withSystem(messages) {
-    if (!this.systemPrompt) return messages;
-    return [{ role: 'system', content: this.systemPrompt }, ...messages];
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
+    const timeStr = now.toLocaleTimeString('en-US');
+    const systemPrompt = AGENT_SYSTEM_PROMPT_BASE.replace('[DATE_TIME_INJECTED_HERE]', `Today's date: ${dateStr}\nCurrent time: ${timeStr}`);
+
+    const fullSystem = systemPrompt + (this.systemPrompt ? '\n\n' + this.systemPrompt : '');
+    return [{ role: 'system', content: fullSystem }, ...messages];
   }
 
   // ---- Adaptive Replay ----
