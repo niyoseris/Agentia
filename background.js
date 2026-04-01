@@ -115,12 +115,19 @@ async function handleMessage(message, sender, sendResponse) {
         if (currentTaskController) currentTaskController.abort();
         currentTaskController = new AbortController();
         const taskSignal = currentTaskController.signal;
-        try {
-          const result = await agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal);
-          sendResponse({ success: true, data: result });
-        } finally {
-          currentTaskController = null;
-        }
+
+        // Respond immediately — Chrome closes message channels on long tasks.
+        // Task lifecycle (TASK_COMPLETE / TASK_STOPPED) arrives via AGENT_EVENT notifications.
+        sendResponse({ success: true, data: { started: true } });
+
+        agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal)
+          .catch((err) => {
+            chrome.runtime.sendMessage({
+              type: 'AGENT_EVENT',
+              data: { type: 'TASK_ERROR', error: err.message, messages: [] }
+            }).catch(() => {});
+          })
+          .finally(() => { currentTaskController = null; });
         break;
       }
 

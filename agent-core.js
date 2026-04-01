@@ -634,7 +634,7 @@ export class AgentCore {
     while (iterations < this.maxToolIterations) {
       // Check abort signal before each LLM call
       if (signal?.aborted) {
-        this._notify({ type: 'TASK_STOPPED' });
+        this._notify({ type: 'TASK_STOPPED', messages });
         this._bgMsg('SAVE_TASK_HISTORY', {
           task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
           log, messages, success: false
@@ -642,15 +642,28 @@ export class AgentCore {
         return { success: false, error: 'Durduruldu', log, messages };
       }
 
-      // ── Periodic file reminder ──────────────────────────────────────────
-      // Every 12 iterations: if a file was created but not yet updated/opened,
-      // inject a reminder so the agent doesn't forget about it.
-      if (activeFileKey && iterations > 0 && iterations % 12 === 0 && !fileOpened) {
-        const reminder = fileUpdateCount === 0
-          ? `[REMINDER] You created a file (fileKey: "${activeFileKey}") but have NOT called file_update yet. You must call file_update with all the content you've gathered, then call file_open.`
-          : `[REMINDER] You created a file (fileKey: "${activeFileKey}") but have NOT called file_open yet. Call file_open("${activeFileKey}") as your final step.`;
-        messages.push({ role: 'user', content: reminder });
-        this._notify({ type: 'AGENT_THOUGHT', content: reminder });
+      // ── Auto-checkpoint: force file_update from researchBuffer ────────────
+      // Every 6 iterations: if file was created but NEVER updated, auto-write
+      // partial content from researchBuffer WITHOUT asking the LLM.
+      // (Reminders don't work — LLM says "OK" but never calls file_update)
+      if (activeFileKey && !fileOpened && iterations > 0 && iterations % 6 === 0 && fileUpdateCount === 0 && researchBuffer.length >= 1) {
+        this._notify({ type: 'AGENT_THOUGHT', content: `📄 Auto-checkpoint: ${researchBuffer.length} kaynak bulundu, dosyaya yazılıyor...` });
+        try {
+          const partialHtml = await this._buildFinalHtml(taskDescription, '', researchBuffer);
+          if (partialHtml) {
+            await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: partialHtml });
+            fileUpdateCount++;
+            this._notify({ type: 'TOOL_CALL', tool: 'file_update', args: { fileKey: activeFileKey } });
+            this._notify({ type: 'TOOL_RESULT', tool: 'file_update', result: { fileKey: activeFileKey, updated: true, auto: true } });
+            messages.push({ role: 'user', content: `[AUTO-CHECKPOINT] Your research so far has been saved to the file (fileKey: "${activeFileKey}"). Continue researching more sources. Call file_update again with updated content after each major finding. Call file_open when fully done.` });
+          }
+        } catch (e) {
+          this._notify({ type: 'AGENT_THOUGHT', content: `Auto-checkpoint hatası: ${e.message}` });
+        }
+      }
+      // If file was updated but file_open still missing, remind every 6 iters
+      if (activeFileKey && !fileOpened && iterations > 0 && iterations % 6 === 0 && fileUpdateCount > 0) {
+        messages.push({ role: 'user', content: `[REMINDER] Research is in progress. When you have collected enough data, call file_open("${activeFileKey}") to finish.` });
       }
 
       iterations++;
@@ -743,7 +756,7 @@ export class AgentCore {
         }
 
         log.push({ type: 'final', content: result });
-        this._notify({ type: 'TASK_COMPLETE', result });
+        this._notify({ type: 'TASK_COMPLETE', result, messages, success: true });
         this._bgMsg('SAVE_TASK_HISTORY', {
           task: taskDescription, result, log, messages, success: true
         }).catch(() => {});
@@ -807,7 +820,7 @@ export class AgentCore {
 
         // Check abort signal after each tool execution too
         if (signal?.aborted) {
-          this._notify({ type: 'TASK_STOPPED' });
+          this._notify({ type: 'TASK_STOPPED', messages });
           this._bgMsg('SAVE_TASK_HISTORY', {
             task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
             log, messages, success: false

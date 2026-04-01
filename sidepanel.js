@@ -431,27 +431,15 @@ async function runTask() {
   taskLog('info', `Görev başlatıldı: ${taskText}`);
 
   try {
-    const result = await bgWithRetry('AGENT_RUN_TASK', {
+    // Fire-and-forget: background responds immediately with { started: true }
+    // Task completion arrives via AGENT_EVENT (TASK_COMPLETE / TASK_STOPPED / TASK_ERROR)
+    await bgWithRetry('AGENT_RUN_TASK', {
       task: taskText,
       tabId: currentTabId,
       messages: null
     });
-
-    // Store messages for continuation
-    taskSessionMessages = result?.messages || null;
-
-    if (result?.success) {
-      taskLog('final', '✓ Görev tamamlandı: ' + (result.result || ''));
-      showContinueArea(true);
-    } else {
-      taskLog('error', '✗ Görev durdu: ' + (result?.error || 'Bilinmeyen hata'));
-      showContinueArea(false);
-    }
-    refreshHistory();
   } catch (err) {
-    taskLog('error', '✗ Hata: ' + err.message);
-    showContinueArea(false);
-  } finally {
+    taskLog('error', '✗ Başlatılamadı: ' + err.message);
     setTaskRunning(false);
   }
 }
@@ -478,27 +466,14 @@ async function continueTask() {
   taskLog('info', `↩ Devam talimatı: ${text}`);
 
   try {
-    const result = await bgWithRetry('AGENT_RUN_TASK', {
+    // Fire-and-forget: result arrives via AGENT_EVENT
+    await bgWithRetry('AGENT_RUN_TASK', {
       task: text,
       tabId: currentTabId,
       messages: taskSessionMessages  // Pass full prior context
     });
-
-    // Update messages for next continuation
-    taskSessionMessages = result?.messages || taskSessionMessages;
-
-    if (result?.success) {
-      taskLog('final', '✓ Tamamlandı: ' + (result.result || ''));
-      showContinueArea(true);
-    } else {
-      taskLog('error', '✗ Durdu: ' + (result?.error || 'Bilinmeyen hata'));
-      showContinueArea(false);
-    }
-    refreshHistory();
   } catch (err) {
-    taskLog('error', '✗ Hata: ' + err.message);
-    showContinueArea(false);
-  } finally {
+    taskLog('error', '✗ Başlatılamadı: ' + err.message);
     setTaskRunning(false);
   }
 }
@@ -536,12 +511,26 @@ function handleAgentEvent(data) {
       taskLog('error', `✗ ${data.tool}: ${data.error}`);
       break;
     case 'TASK_COMPLETE':
-      taskLog('final', '✓ Tamamlandı: ' + (data.result || '').substring(0, 120));
+      // Save messages for continuation, update UI
+      if (data.messages) taskSessionMessages = data.messages;
+      taskLog('final', '✓ Görev tamamlandı: ' + (data.result || '').substring(0, 120));
+      setTaskRunning(false);
+      showContinueArea(true);
+      refreshHistory();
       break;
     case 'TASK_STOPPED':
+      if (data.messages) taskSessionMessages = data.messages;
       taskLog('info', '⏹ Görev durduruldu');
       setTaskRunning(false);
       showContinueArea(false);
+      refreshHistory();
+      break;
+    case 'TASK_ERROR':
+      if (data.messages) taskSessionMessages = data.messages;
+      taskLog('error', '✗ Görev hatası: ' + (data.error || 'Bilinmeyen hata'));
+      setTaskRunning(false);
+      showContinueArea(false);
+      refreshHistory();
       break;
     case 'ADAPTIVE_REPLAY_START':
       taskLog('info', `🔄 Adaptif tekrar başladı: ${data.recording}`);
