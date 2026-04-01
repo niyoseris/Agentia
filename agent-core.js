@@ -439,14 +439,14 @@ When the user asks for a report, guide, list, HTML page, or any document:
 
 **Option A — Simple one-shot (PREFERRED for most tasks):**
 1. Research first — browse all sources, collect all data
-2. Call **create_file** ONCE at the end with the COMPLETE HTML content
-   - `create_file` creates AND opens the file in one step — it is done
+2. Call create_file ONCE at the end with the COMPLETE HTML content
+   - create_file creates AND opens the file in one step — it is done
 
 **Option B — Progressive (only for long multi-source tasks):**
-1. `file_create` with skeleton HTML → note the returned fileKey
+1. file_create with skeleton HTML → note the returned fileKey
 2. Research and browse
-3. `file_update(fileKey, fullHtml)` after EACH source — always pass FULL accumulated HTML
-4. `file_open(fileKey)` as the VERY LAST step
+3. file_update(fileKey, fullHtml) after EACH source — always pass FULL accumulated HTML
+4. file_open(fileKey) as the VERY LAST step
 
 **Rules:**
 - NEVER respond with text saying "I'll create the file" — call the tool
