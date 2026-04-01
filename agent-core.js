@@ -429,10 +429,22 @@ const AGENT_SYSTEM_PROMPT = `You are Agentia, an agentic browser assistant. You 
 
 ## Core Rules
 - tab_create and tab_navigate both wait for the page to fully load before returning — you do NOT need an extra wait() call after them. Go directly to DOM actions.
+- tab_create returns { tabId, url, title } — ALWAYS save this tabId and pass it to every subsequent tool call on that tab. Never call dom_* without a tabId after opening a new tab.
 - Call dom_get_summary ONCE per page to understand the layout — do not repeat it
 - Never call page_get_info and dom_get_summary on the same page — pick one
 - For links/products: use href values from dom_query_all with tab_navigate instead of dom_click
 - When you have enough data to answer a simple question, stop browsing and respond
+
+## Web Search
+Prefer DuckDuckGo — it exposes real links without obfuscation:
+  tab_navigate(tabId, "https://duckduckgo.com/?q=your+query")
+  dom_query_all({ selector: "article[data-testid='result'] a[data-testid='result-title-a']", tabId })
+  → each element has .text (title) and .href (real URL)
+
+For Google search results:
+  dom_query_all({ selector: "#search .g h3", tabId }) → titles
+  dom_query_all({ selector: "#search .g a:first-of-type", tabId }) → links (use .href)
+  Avoid selector "div.g a[href^='http']" — it returns 0 results on current Google DOM.
 
 ## File & Report Tasks (MANDATORY)
 When the user asks for a report, guide, list, HTML page, or any document:
@@ -969,6 +981,25 @@ export class AgentCore {
   _sanitizeToolResult(tool, result) {
     if (!result || typeof result !== 'object') return result;
 
+    // ── Tab operations: always return clean { tabId, url, title } ─────────────
+    // Raw Chrome Tab objects have 30+ fields — LLM loses the tabId in the noise
+    if (tool === 'tab_create' || tool === 'tab_get_active' || tool === 'tab_reload') {
+      // Chrome Tab object has .id
+      if (result.id !== undefined) {
+        return { tabId: result.id, url: result.url || '', title: result.title || '' };
+      }
+    }
+    if (tool === 'tab_navigate') {
+      // Returns { navigated: true, url }
+      return { navigated: result.navigated || true, url: result.url || '' };
+    }
+    if (tool === 'tab_get_all') {
+      // Array of tabs — trim each to essentials
+      if (Array.isArray(result)) {
+        return result.slice(0, 10).map(t => ({ tabId: t.id, url: t.url, title: t.title, active: t.active }));
+      }
+    }
+
     // File tools: never send content back — just confirm with fileKey
     if (tool === 'file_create') {
       return { fileKey: result.fileKey, created: true };
@@ -997,11 +1028,11 @@ export class AgentCore {
     if (tool === 'dom_query_all' && result.elements) {
       return {
         count: result.count,
-        elements: result.elements.slice(0, 15).map(el => ({
+        elements: result.elements.slice(0, 25).map(el => ({
           tag: el.tag,
           id: el.id,
-          text: (el.text || '').substring(0, 80),
-          href: (el.href || '').substring(0, 120),
+          text: (el.text || '').substring(0, 100),
+          href: (el.href || '').substring(0, 200),
           value: el.value
         }))
       };
