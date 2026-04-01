@@ -449,21 +449,22 @@ For Google search results:
 ## File & Report Tasks (MANDATORY)
 When the user asks for a report, guide, list, HTML page, or any document:
 
-**Option A — Simple one-shot (PREFERRED for most tasks):**
-1. Research first — browse all sources, collect all data
-2. Call create_file ONCE at the end with the COMPLETE HTML content
-   - create_file creates AND opens the file in one step — it is done
+**ALWAYS use Progressive Mode (file_create → research → file_update → file_open):**
+1. file_create(name, skeletonHtml, type='html') → returns { fileKey }. SAVE THIS KEY.
+2. Research: browse, extract data, collect snippets.
+3. file_update(fileKey, accumulatedHtml) after EACH meaningful source — always send FULL HTML so far.
+4. file_open(fileKey) as VERY LAST step — only when ALL research is done.
 
-**Option B — Progressive (only for long multi-source tasks):**
-1. file_create with skeleton HTML → note the returned fileKey
-2. Research and browse
-3. file_update(fileKey, fullHtml) after EACH source — always pass FULL accumulated HTML
-4. file_open(fileKey) as the VERY LAST step
+Why progressive:
+- You get live feedback (viewer auto-refreshes every 3 seconds)
+- If max iterations hit, file is already filled with partial results
+- User can watch progress in real-time
 
 **Rules:**
-- NEVER respond with text saying "I'll create the file" — call the tool
-- NEVER leave a task with "I have finished my research" without creating the file
-- ALWAYS end with a file tool call when the task involves a document/report
+- NEVER say "I'll create the file now" — just call file_create immediately
+- NEVER skip file_create/file_update/file_open — they are mandatory for all document tasks
+- After each source/finding, call file_update with the FULL accumulated HTML (includes all previous items + new item)
+- ALWAYS end with file_open(fileKey) before task completes
 
 ## HTML File Quality
 When creating HTML reports:
