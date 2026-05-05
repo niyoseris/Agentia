@@ -39,12 +39,14 @@
     isRecording = true;
     recordingId = id;
     showBadge('Kayıt Başladı', '#e74c3c');
+    startPulse();
     attachRecordingListeners();
   }
 
   function stopRecording() {
     isRecording = false;
     recordingId = null;
+    stopPulse();
     showBadge('Kayıt Durdu', '#27ae60');
     setTimeout(hideBadge, 2000);
     detachRecordingListeners();
@@ -162,7 +164,7 @@
   }
 
   function sendEvent(event) {
-    chrome.runtime.sendMessage({ type: 'RECORDING_EVENT', payload: { event } }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'RECORDING_EVENT', payload: { event } }).catch((e) => { console.warn('[Agentia] Recording event send failed:', e.message); });
   }
 
   // ---- Smart Selector Generation ----
@@ -289,12 +291,29 @@
     if (badge) badge.style.opacity = '0';
   }
 
-  // Recording indicator pulse
-  setInterval(() => {
-    if (isRecording && badge) {
-      badge.style.opacity = badge.style.opacity === '1' ? '0.5' : '1';
+  // Recording indicator pulse — only runs during recording
+  let pulseInterval = null;
+
+  function startPulse() {
+    if (pulseInterval) return;
+    pulseInterval = setInterval(() => {
+      if (badge) badge.style.opacity = badge.style.opacity === '1' ? '0.5' : '1';
+    }, 800);
+  }
+
+  function stopPulse() {
+    if (pulseInterval) {
+      clearInterval(pulseInterval);
+      pulseInterval = null;
     }
-  }, 800);
+  }
+
+  // ---- Restore recording state after navigation ----
+  chrome.runtime.sendMessage({ type: 'CHECK_RECORDING_STATUS' }).then((response) => {
+    if (response?.isRecording) {
+      startRecording(response.recordingId);
+    }
+  }).catch(() => {}); // Background may not be ready yet
 
   // ---- Element Highlight ----
   function highlightElement(selector) {
@@ -337,8 +356,5 @@
       highlightEl = null;
     }, 3000);
   }
-
-  // ---- Notify background that content script is ready ----
-  chrome.runtime.sendMessage({ type: 'CONTENT_READY', url: location.href }).catch(() => {});
 
 })();

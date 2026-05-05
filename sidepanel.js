@@ -16,6 +16,8 @@ let currentTabId = null;
 let chatHistory = []; // { role, content }
 let taskSessionMessages = null;  // Full message history of the current task session
 let taskSessionName = '';        // Original task description of the session
+const CHAT_STORAGE_KEY = 'agentia_chat_history';
+const MAX_CHAT_MESSAGES = 100;
 
 // Background message with auto-retry on "initializing" error
 async function bgWithRetry(type, payload, maxRetries = 4, delayMs = 1500) {
@@ -42,18 +44,23 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupHistory();
   setupRecordings();
   setupSettings();
+  setupKeyboardShortcuts();
+  setupTheme();
   await loadSettings();
   await checkConnection();
   await refreshRecordings();
   await refreshHistory();
+  await loadChatHistory();
   getCurrentTab();
 });
 
 async function getCurrentTab() {
   try {
     const tab = await bg('TAB_ACTION', { action: 'get_active' });
-    currentTabId = tab?.id;
-  } catch {}
+    currentTabId = tab?.id || null;
+  } catch {
+    currentTabId = null;
+  }
 }
 
 // ---- Background Event Listener ----
@@ -114,7 +121,9 @@ async function loadSettings() {
     if (s.maxTokens) document.getElementById('max-tokens').value = s.maxTokens;
     if (s.systemPrompt) document.getElementById('system-prompt').value = s.systemPrompt;
     if (s.replayDelay) document.getElementById('replay-delay').value = s.replayDelay;
-    if (s.maxIterations) document.getElementById('max-iterations').value = s.maxIterations;
+    if (s.maxIterations !== undefined) document.getElementById('max-iterations').value = s.maxIterations;
+    if (s.thinkingMode !== undefined) document.getElementById('thinking-mode').value = s.thinkingMode;
+    if (s.visionEnabled !== undefined) document.getElementById('vision-enabled').value = s.visionEnabled;
     if (s.autoRecord) document.getElementById('auto-record').checked = s.autoRecord;
     updateModelBadge(s.model);
   } catch {}
@@ -174,6 +183,8 @@ function setupSettings() {
       systemPrompt: document.getElementById('system-prompt').value,
       replayDelay: parseInt(document.getElementById('replay-delay').value),
       maxIterations: parseInt(document.getElementById('max-iterations').value),
+      thinkingMode: document.getElementById('thinking-mode').value,
+      visionEnabled: document.getElementById('vision-enabled').value,
       autoRecord: document.getElementById('auto-record').checked
     };
     try {
@@ -212,7 +223,7 @@ function handlePullProgress(data) {
   if (data.status === 'success') {
     el.textContent = '✓ İndirildi!';
     el.style.color = 'var(--green)';
-    bg('OLLAMA_MODELS', {}).then(populateModels).catch(() => {});
+    bg('OLLAMA_MODELS', {}).then(populateModels).catch((e) => { console.warn('[Agentia] Model list refresh failed:', e.message); });
   }
 }
 
@@ -237,6 +248,8 @@ function setupChat() {
   });
 
   btn.addEventListener('click', sendChat);
+
+  setupClearChat();
 }
 
 async function sendChat() {
@@ -250,6 +263,7 @@ async function sendChat() {
 
   appendMessage('user', text);
   chatHistory.push({ role: 'user', content: text });
+  saveChatHistory();
 
   const typingEl = appendTyping();
 
@@ -295,10 +309,31 @@ function handleStreamChunk(chunk) {
     scrollMessages();
   }
 
+  // Show thinking/reasoning content as a subtle thought bubble (only if thinking mode is enabled)
+  const thinkingMode = document.getElementById('thinking-mode')?.value || 'off';
+  if (chunk.thinking && thinkingMode !== 'off') {
+    let thoughtEl = document.getElementById('stream-thought');
+    if (!thoughtEl) {
+      thoughtEl = document.createElement('div');
+      thoughtEl.id = 'stream-thought';
+      thoughtEl.style.cssText = 'font-size:12px;color:var(--text3);font-style:italic;padding:4px 12px;margin-bottom:4px;opacity:0.7;';
+      streamEl.parentElement.insertBefore(thoughtEl, streamEl);
+    }
+    thoughtEl.textContent = '💭 ' + chunk.thinking.substring(0, 200) + (chunk.thinking.length > 200 ? '...' : '');
+    scrollMessages();
+  }
+
   if (chunk.done) {
     chatHistory.push({ role: 'assistant', content: streamBuffer });
+    saveChatHistory();
+    if (streamEl && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+      streamEl.innerHTML = DOMPurify.sanitize(marked.parse(streamBuffer));
+      streamEl.classList.add('markdown-body');
+    }
     streamBuffer = '';
     streamEl = null;
+    // Clear thinking bubble after stream ends
+    document.getElementById('stream-thought')?.remove();
   }
 }
 
@@ -309,7 +344,13 @@ function appendMessage(role, content) {
 
   const bubble = document.createElement('div');
   bubble.className = 'message-bubble';
-  bubble.textContent = content;
+
+  if (role === 'assistant' && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+    bubble.innerHTML = DOMPurify.sanitize(marked.parse(content));
+    bubble.classList.add('markdown-body');
+  } else {
+    bubble.textContent = content;
+  }
 
   const time = document.createElement('div');
   time.className = 'message-time';
@@ -336,9 +377,15 @@ function appendTyping() {
   return div;
 }
 
+let _scrollTimer = null;
 function scrollMessages() {
-  const el = document.getElementById('messages');
-  el.scrollTop = el.scrollHeight;
+  // Debounce: coalesce rapid calls during streaming
+  if (_scrollTimer) return;
+  _scrollTimer = requestAnimationFrame(() => {
+    const el = document.getElementById('messages');
+    el.scrollTop = el.scrollHeight;
+    _scrollTimer = null;
+  });
 }
 
 // ---- Task (Autonomous Agent) ----
@@ -424,6 +471,13 @@ async function runTask() {
   const taskText = document.getElementById('task-input').value.trim();
   if (!taskText) return;
 
+  // Refresh active tab — prevents stale tab ID errors
+  await getCurrentTab();
+  if (!currentTabId) {
+    taskLog('error', '✗ Aktif sekme bulunamadı. Lütfen bir sayfa açın.');
+    return;
+  }
+
   taskSessionMessages = null; // fresh session
   enterTaskSession(taskText);
   setTaskRunning(true);
@@ -449,6 +503,14 @@ async function continueTask() {
   const input = document.getElementById('task-continue-input');
   const text = input.value.trim();
   if (!text) return;
+
+  // Refresh active tab — prevents stale tab ID errors on continuation
+  await getCurrentTab();
+  if (!currentTabId) {
+    taskLog('error', '✗ Aktif sekme bulunamadı. Lütfen bir sayfa açın.');
+    setTaskRunning(false);
+    return;
+  }
 
   input.value = '';
   input.style.height = 'auto';
@@ -519,14 +581,14 @@ function handleAgentEvent(data) {
       refreshHistory();
       break;
     case 'TASK_STOPPED':
-      if (data.messages) taskSessionMessages = data.messages;
+      if (data.messages?.length > 0) taskSessionMessages = data.messages;
       taskLog('info', '⏹ Görev durduruldu');
       setTaskRunning(false);
       showContinueArea(false);
       refreshHistory();
       break;
     case 'TASK_ERROR':
-      if (data.messages) taskSessionMessages = data.messages;
+      if (data.messages?.length > 0) taskSessionMessages = data.messages;
       taskLog('error', '✗ Görev hatası: ' + (data.error || 'Bilinmeyen hata'));
       setTaskRunning(false);
       showContinueArea(false);
@@ -773,6 +835,9 @@ function renderHistory(history) {
       : '<span class="chip chip-red">✗ Başarısız</span>';
 
     const preview = (entry.result || '').substring(0, 100) + (entry.result?.length > 100 ? '...' : '');
+    const reportBtn = entry.reportFileKey
+      ? `<button class="btn btn-secondary btn-sm" data-action="view-report" data-filekey="${escHtml(entry.reportFileKey)}">📄 Raporu Görüntüle</button>`
+      : '';
 
     item.innerHTML = `
       <div class="history-header">
@@ -782,11 +847,16 @@ function renderHistory(history) {
       <div class="history-result">${escHtml(preview)}</div>
       <div class="history-meta">${date}</div>
       <div class="history-actions">
-        <button class="btn btn-secondary btn-sm" data-action="continue" data-id="${entry.id}">💬 Konuşmaya Devam Et</button>
+        ${reportBtn}
+        <button class="btn btn-secondary btn-sm" data-action="continue" data-id="${entry.id}">💬 Devam Et</button>
         <button class="btn btn-danger btn-sm" data-action="delete" data-id="${entry.id}">✕ Sil</button>
       </div>
     `;
 
+    const reportBtnEl = item.querySelector('[data-action="view-report"]');
+    if (reportBtnEl) {
+      reportBtnEl.addEventListener('click', () => viewReport(reportBtnEl.dataset.filekey));
+    }
     item.querySelector('[data-action="continue"]').addEventListener('click', () => {
       continueFromHistory(entry);
     });
@@ -802,49 +872,248 @@ function renderHistory(history) {
   });
 }
 
+async function viewReport(fileKey) {
+  try {
+    await bg('FILE_OPEN', { fileKey });
+  } catch (err) {
+    alert('Rapor açılamadı: ' + err.message);
+  }
+}
+
 function continueFromHistory(entry) {
-  // Load the task's full message history into chat and switch to chat tab
-  chatHistory = entry.messages || [];
+  // Load the task's full message history into the task session context
+  // so the continue flow runs with full tool support (not plain chat)
+  taskSessionMessages = entry.messages || [];
+  taskSessionName = entry.task || '';
 
-  // Clear chat messages and rebuild from history
-  const messagesEl = document.getElementById('messages');
-  messagesEl.innerHTML = '';
+  // Show the task in the task log, hide new task area, show session header
+  clearTaskLog();
+  enterTaskSession(entry.task);
 
-  // Add a context header
-  const headerDiv = document.createElement('div');
-  headerDiv.className = 'message assistant';
-  headerDiv.innerHTML = `<div class="message-bubble" style="background:rgba(91,82,232,0.08);border-color:rgba(91,82,232,0.2);color:var(--accent);">
-    🕓 <strong>Geçmiş görev:</strong> ${escHtml(entry.task)}<br>
-    <span style="font-size:11px;color:var(--text3);">${new Date(entry.createdAt).toLocaleString('tr-TR')}</span>
-  </div>`;
-  messagesEl.appendChild(headerDiv);
-
-  // Show the final result as an assistant message
+  taskLog('info', `🕓 Geçmiş görev yüklendi: ${entry.task}`);
   if (entry.result) {
-    const resultDiv = document.createElement('div');
-    resultDiv.className = 'message assistant';
-    const bubble = document.createElement('div');
-    bubble.className = 'message-bubble';
-    bubble.textContent = entry.result;
-    resultDiv.appendChild(bubble);
-    messagesEl.appendChild(resultDiv);
+    taskLog('final', (entry.success ? '✓' : '✗') + ' ' + entry.result.substring(0, 200));
   }
 
-  // Append a hint
-  const hintDiv = document.createElement('div');
-  hintDiv.className = 'message assistant';
-  hintDiv.innerHTML = `<div class="message-bubble" style="font-size:11px;color:var(--text3);background:var(--bg3);border:none;box-shadow:none;">
-    Bu görev hakkında soru sorabilir veya devam edebilirsin.
-  </div>`;
-  messagesEl.appendChild(hintDiv);
-
-  scrollMessages();
-
-  // Switch to chat tab
-  document.querySelector('[data-tab="chat"]').click();
+  // Switch to task tab and show continue area
+  document.querySelector('[data-tab="task"]').click();
+  showContinueArea(entry.success !== false);
+  document.getElementById('task-continue-input').placeholder = '✏️ Bu göreve ek talimat yaz veya devam et...';
 }
 
 // ---- Helpers ----
 function escHtml(str) {
   return (str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ---- Memory Tab ----
+async function loadMemory() {
+  try {
+    const data = await bgWithRetry('MEMORY_GET', {});
+    renderMemory(data);
+  } catch (err) {
+    document.getElementById('memory-learned-list').textContent = 'Hata: ' + err.message;
+  }
+}
+
+function renderMemory(data) {
+  // Learned facts
+  const learnedEl = document.getElementById('memory-learned-list');
+  if (data.learned && data.learned.length > 0) {
+    learnedEl.innerHTML = data.learned.map(l => `
+      <div style="margin-bottom:8px; padding:8px; background:var(--bg3); border-radius:6px;">
+        <div style="font-weight:600; color:var(--text1);">${escHtml(l.topic)}</div>
+        <div style="color:var(--text2); margin-top:2px;">${escHtml(l.info)}</div>
+        <button data-action="delete-learned" data-id="${escHtml(l.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer; margin-top:4px;">Sil</button>
+      </div>
+    `).join('');
+    learnedEl.querySelectorAll('[data-action="delete-learned"]').forEach(btn => {
+      btn.addEventListener('click', () => deleteLearned(btn.dataset.id));
+    });
+  } else {
+    learnedEl.innerHTML = '<div style="color:var(--text3);">Henüz öğrenilen bilgi yok. Agent görevler sırasında otomatik öğrenir.</div>';
+  }
+
+  // Task memory
+  const tasksEl = document.getElementById('memory-tasks-list');
+  if (data.taskMemory && data.taskMemory.length > 0) {
+    tasksEl.innerHTML = data.taskMemory.slice(0, 10).map(t => `
+      <div style="margin-bottom:6px; padding:6px 8px; background:var(--bg3); border-radius:6px;">
+        <span style="color:${t.success ? 'var(--success)' : 'var(--danger)'};">${t.success ? '✓' : '✗'}</span>
+        <span style="color:var(--text1);">${escHtml(t.task)}</span>
+        <div style="font-size:11px; color:var(--text3); margin-top:2px;">${escHtml(t.summary)}</div>
+      </div>
+    `).join('');
+  } else {
+    tasksEl.innerHTML = '<div style="color:var(--text3);">Henüz görev geçmişi yok.</div>';
+  }
+
+  // Chat memory
+  const chatsEl = document.getElementById('memory-chats-list');
+  if (data.chatMemory && data.chatMemory.length > 0) {
+    chatsEl.innerHTML = data.chatMemory.slice(0, 5).map(c => `
+      <div style="margin-bottom:6px; padding:6px 8px; background:var(--bg3); border-radius:6px;">
+        <div style="color:var(--text2);">${escHtml(c.summary)}</div>
+        ${c.topics?.length ? '<div style="font-size:11px; color:var(--text3); margin-top:2px;">' + c.topics.map(t => '#' + escHtml(t)).join(' ') + '</div>' : ''}
+      </div>
+    `).join('');
+  } else {
+    chatsEl.innerHTML = '<div style="color:var(--text3);">Henüz sohbet özeti yok.</div>';
+  }
+
+  // Preferences
+  const prefsEl = document.getElementById('memory-prefs-list');
+  const prefs = data.preferences || {};
+  if (Object.keys(prefs).length > 0) {
+    prefsEl.innerHTML = Object.entries(prefs).map(([k, v]) => `
+      <div style="margin-bottom:4px; padding:4px 8px; background:var(--bg3); border-radius:4px;">
+        <span style="color:var(--accent);">${escHtml(k)}</span>: <span style="color:var(--text2);">${escHtml(String(v))}</span>
+      </div>
+    `).join('');
+  } else {
+    prefsEl.innerHTML = '<div style="color:var(--text3);">Henüz tercih kaydedilmedi.</div>';
+  }
+
+  // Site Recipes
+  const recipesEl = document.getElementById('memory-recipes-list');
+  if (data.recipes && data.recipes.length > 0) {
+    recipesEl.innerHTML = data.recipes.slice(0, 10).map(r => `
+      <div style="margin-bottom:8px; padding:8px; background:var(--bg3); border-radius:6px;">
+        <div style="font-weight:600; color:var(--accent);">${escHtml(r.site)}</div>
+        <div style="color:var(--text1); margin-top:2px;">${escHtml(r.task)}</div>
+        <div style="font-size:11px; color:var(--text3); margin-top:4px;">${r.steps.length} adım${r.useCount ? ' · ' + r.useCount + ' kez kullanıldı' : ''}</div>
+        <button data-action="delete-recipe" data-id="${escHtml(r.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer; margin-top:4px;">Sil</button>
+      </div>
+    `).join('');
+    recipesEl.querySelectorAll('[data-action="delete-recipe"]').forEach(btn => {
+      btn.addEventListener('click', () => deleteRecipe(btn.dataset.id));
+    });
+  } else {
+    recipesEl.innerHTML = '<div style="color:var(--text3);">Henüz site reçetesi yok. Ajan başarıyla tamamladığı işlemleri otomatik kaydeder.</div>';
+  }
+}
+
+async function deleteLearned(id) {
+  await bgWithRetry('MEMORY_DELETE_LEARNED', { id });
+  loadMemory();
+}
+
+async function deleteRecipe(id) {
+  await bgWithRetry('MEMORY_DELETE_RECIPE', { id });
+  loadMemory();
+}
+
+async function clearMemory() {
+  if (!confirm('Tüm memory verileri silinecek. Emin misiniz?')) return;
+  await bgWithRetry('MEMORY_CLEAR', {});
+  loadMemory();
+}
+
+// Bind memory tab events
+document.getElementById('memory-refresh-btn')?.addEventListener('click', loadMemory);
+document.getElementById('memory-clear-btn')?.addEventListener('click', clearMemory);
+
+// Load memory when tab is shown
+document.querySelectorAll('[data-tab="memory"]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    setTimeout(loadMemory, 100);
+  });
+});
+
+// ---- Chat Persistence ----
+async function saveChatHistory() {
+  const trimmed = chatHistory.slice(-MAX_CHAT_MESSAGES);
+  await chrome.storage.local.set({ [CHAT_STORAGE_KEY]: trimmed });
+}
+
+async function loadChatHistory() {
+  try {
+    const data = await chrome.storage.local.get(CHAT_STORAGE_KEY);
+    const saved = data[CHAT_STORAGE_KEY] || [];
+    chatHistory = saved;
+    if (saved.length > 0) {
+      const messagesEl = document.getElementById('messages');
+      messagesEl.innerHTML = '';
+      for (const msg of saved) {
+        appendMessage(msg.role, msg.content);
+      }
+      scrollMessages();
+    }
+  } catch (e) {
+    console.warn('[Agentia] Chat history load failed:', e.message);
+  }
+}
+
+function setupClearChat() {
+  document.getElementById('clear-chat-btn').addEventListener('click', async () => {
+    chatHistory = [];
+    await chrome.storage.local.remove(CHAT_STORAGE_KEY);
+    document.getElementById('messages').innerHTML = '';
+    appendMessage('assistant', 'Sohbet temizlendi. Nasıl yardımcı olabilirim?');
+  });
+}
+
+// ---- Theme (Dark Mode) ----
+function getPreferredTheme() {
+  const saved = localStorage.getItem('agentia-theme');
+  if (saved) return saved;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  const icon = document.getElementById('theme-icon');
+  if (icon) icon.textContent = theme === 'dark' ? '🌙' : '☀';
+  localStorage.setItem('agentia-theme', theme);
+}
+
+function setupTheme() {
+  setTheme(getPreferredTheme());
+
+  document.getElementById('theme-toggle')?.addEventListener('click', () => {
+    const current = document.documentElement.getAttribute('data-theme');
+    setTheme(current === 'dark' ? 'light' : 'dark');
+  });
+
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+    if (!localStorage.getItem('agentia-theme')) {
+      setTheme(e.matches ? 'dark' : 'light');
+    }
+  });
+}
+
+// ---- Keyboard Shortcuts ----
+function setupKeyboardShortcuts() {
+  document.addEventListener('keydown', (e) => {
+    // Ctrl+1 through Ctrl+6: Switch tabs
+    if (e.ctrlKey && e.key >= '1' && e.key <= '6') {
+      e.preventDefault();
+      const tabButtons = document.querySelectorAll('.tab-btn');
+      const idx = parseInt(e.key) - 1;
+      if (tabButtons[idx]) tabButtons[idx].click();
+      return;
+    }
+
+    // Escape: Stop task or blur focus
+    if (e.key === 'Escape') {
+      if (isRunningTask) {
+        e.preventDefault();
+        stopTask();
+        return;
+      }
+      document.activeElement?.blur();
+      return;
+    }
+
+    // /: Focus chat input (only when no input is focused)
+    if (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) {
+      e.preventDefault();
+      const chatInput = document.getElementById('chat-input');
+      if (!document.getElementById('tab-chat').classList.contains('active')) {
+        document.querySelector('[data-tab="chat"]').click();
+      }
+      chatInput?.focus();
+      return;
+    }
+  });
 }

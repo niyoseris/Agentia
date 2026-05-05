@@ -71,7 +71,7 @@ function render(isUpdate = false) {
 
       htmlIframe = document.createElement('iframe');
       htmlIframe.style.cssText = 'width:100%;height:100%;border:none;background:#fff;';
-      htmlIframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-popups allow-forms');
+      htmlIframe.setAttribute('sandbox', 'allow-scripts allow-popups allow-forms');
       htmlIframe.src = blobUrl;
       wrapper.appendChild(htmlIframe);
     }
@@ -91,7 +91,7 @@ function render(isUpdate = false) {
   htmlIframe = null;
 
   if (fileType === 'markdown' || fileType === 'md') {
-    area.innerHTML = '<div class="md">' + markdownToHtml(rawContent) + '</div>';
+    area.innerHTML = '<div class="md">' + (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined' ? DOMPurify.sanitize(marked.parse(rawContent)) : escHtml(rawContent)) + '</div>';
     return;
   }
 
@@ -106,32 +106,7 @@ function render(isUpdate = false) {
   }
 
   // Default: treat as markdown-like text
-  area.innerHTML = '<div class="md">' + markdownToHtml(rawContent) + '</div>';
-}
-
-function markdownToHtml(md) {
-  return md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\|(.+)\|\n\|[-| :]+\|\n((?:\|.+\|\n?)*)/g, function(_, header, rows) {
-      var ths = header.split('|').filter(function(s) { return s.trim(); }).map(function(s) { return '<th>' + s.trim() + '</th>'; }).join('');
-      var trs = rows.trim().split('\n').map(function(row) {
-        var tds = row.split('|').filter(function(s) { return s.trim(); }).map(function(s) { return '<td>' + s.trim() + '</td>'; }).join('');
-        return '<tr>' + tds + '</tr>';
-      }).join('');
-      return '<table><thead><tr>' + ths + '</tr></thead><tbody>' + trs + '</tbody></table>';
-    })
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/^- (.+)$/gm, '<li>$1</li>')
-    .replace(/^\d+\. (.+)$/gm, '<li>$1</li>')
-    .replace(/(<li>.*<\/li>\n?)+/g, function(s) { return '<ul>' + s + '</ul>'; })
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/^([^<\n].+)$/gm, '<p>$1</p>');
+  area.innerHTML = '<div class="md">' + (typeof DOMPurify !== 'undefined' && typeof marked !== 'undefined' ? DOMPurify.sanitize(marked.parse(rawContent)) : escHtml(rawContent)) + '</div>';
 }
 
 function escHtml(s) {

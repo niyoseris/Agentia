@@ -11,12 +11,6 @@
     "storage",
     "sidePanel",
     "contextMenus",
-    "notifications",
-    "history",
-    "bookmarks",
-    "downloads",
-    "clipboardRead",
-    "clipboardWrite",
     "alarms"
   ],
 
@@ -63,7 +57,7 @@
 
   "web_accessible_resources": [
     {
-      "resources": ["injected.js", "viewer.html"],
+      "resources": ["injected.js", "viewer.html", "lib/*"],
       "matches": ["<all_urls>"]
     }
   ]

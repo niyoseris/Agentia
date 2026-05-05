@@ -1,28 +1,36 @@
 // Agentia Background Service Worker
-// Handles Ollama communication, tab management, and agent orchestration
+// Message routing, initialization, and agent orchestration
 
 import { AgentCore } from './agent-core.js';
 import { ActionStore } from './action-store.js';
+import { MemoryStore } from './memory-store.js';
+import { handleTabAction } from './tab-handler.js';
+import { handleDomAction } from './dom-handler.js';
+import { handleWebSearch } from './search-handler.js';
+import { handlePdfRead } from './pdf-handler.js';
+import { handleImageSave } from './image-handler.js';
+import { startRecording, stopRecording, getActiveRecording, setActiveRecording, replayRecording } from './recording-handler.js';
+import { getSettings, saveSettings } from './settings-handler.js';
+import { getTaskHistory, saveTaskHistory, deleteTaskHistory } from './ollama-handler.js';
+import { getActiveTabId } from './utils.js';
 
 const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
 let actionStore = null;
-let initPromise = null; // Tracks ongoing initialization
-let currentTaskController = null; // AbortController for the running task
+let memoryStore = null;
+let initPromise = null;
+let currentTaskController = null;
+let activeTaskId = null;
 
 // ── MV3 Service Worker Keepalive ──────────────────────────────────────────────
-// Chrome MV3 suspends service workers after ~30s of inactivity.
-// During a long-running task, we use a repeating alarm to prevent suspension.
-// The alarm handler just needs to exist — the act of firing keeps the SW alive.
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'agentia-keepalive') {
-    // No-op: alarm fires every 25s to keep service worker awake during tasks
     console.log('[Agentia] keepalive ping, task running:', !!currentTaskController);
   }
 });
 
 function startKeepalive() {
-  chrome.alarms.create('agentia-keepalive', { periodInMinutes: 0.4 }); // ~24s
+  chrome.alarms.create('agentia-keepalive', { periodInMinutes: 0.4 });
 }
 
 function stopKeepalive() {
@@ -43,12 +51,24 @@ async function init() {
     });
   };
 
-  // Apply saved settings immediately so cloud/apiKey are active from the start
   const saved = await getSettings();
   agentCore.updateSettings(saved);
 
   actionStore = new ActionStore();
   await actionStore.load();
+
+  memoryStore = new MemoryStore();
+  await memoryStore.load();
+  agentCore.memoryStore = memoryStore;
+
+  // Restore active recording state after service worker restart
+  const sessionData = await chrome.storage.session.get('agentia_active_recording');
+  if (sessionData.agentia_active_recording) {
+    setActiveRecording(sessionData.agentia_active_recording);
+    actionStore.setActiveRecording(sessionData.agentia_active_recording);
+    console.log('[Agentia] Restored active recording:', sessionData.agentia_active_recording?.id);
+  }
+
   setupContextMenu();
   console.log('[Agentia] Background initialized, cloud:', saved.useCloud);
 }
@@ -75,7 +95,11 @@ function setupContextMenu() {
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === 'agentia-record') {
-    toggleRecording(tab);
+    if (getActiveRecording()) {
+      await stopRecording(tab.id, actionStore);
+    } else {
+      await startRecording(tab.id, null, actionStore);
+    }
   } else if (info.menuItemId === 'agentia-panel') {
     chrome.sidePanel.open({ tabId: tab.id });
   } else if (info.menuItemId === 'agentia-ask') {
@@ -83,16 +107,15 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
 });
 
-// Message handler - central communication hub
+// Message handler — central communication hub
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   handleMessage(message, sender, sendResponse);
-  return true; // Keep channel open for async
+  return true;
 });
 
 async function handleMessage(message, sender, sendResponse) {
   const { type, payload = {} } = message;
 
-  // If init is still running, wait for it (up to 8s) before handling
   if (initPromise && (!agentCore || !actionStore)) {
     try {
       await Promise.race([
@@ -109,11 +132,6 @@ async function handleMessage(message, sender, sendResponse) {
 
   try {
     switch (type) {
-      // Sent by content.js on every page load — just acknowledge
-      case 'CONTENT_READY':
-        sendResponse({ success: true });
-        break;
-
       case 'AGENT_CHAT': {
         const result = await agentCore.chat(payload.messages, payload.tabId);
         sendResponse({ success: true, data: result });
@@ -121,37 +139,38 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'AGENT_STREAM_CHAT': {
-        // Stream responses back via port
         await agentCore.streamChat(payload.messages, payload.tabId, (chunk) => {
-          chrome.runtime.sendMessage({ type: 'STREAM_CHUNK', chunk }).catch(() => {});
+          chrome.runtime.sendMessage({ type: 'STREAM_CHUNK', chunk }).catch((e) => { console.warn('[Agentia] Stream notification failed:', e.message); });
         });
         sendResponse({ success: true });
         break;
       }
 
       case 'AGENT_RUN_TASK': {
-        // Abort any previous task still running
         if (currentTaskController) currentTaskController.abort();
+        const taskId = `task_${Date.now()}`;
+        activeTaskId = taskId;
         currentTaskController = new AbortController();
         const taskSignal = currentTaskController.signal;
 
-        // Respond immediately — Chrome closes message channels on long tasks.
-        // Task lifecycle (TASK_COMPLETE / TASK_STOPPED) arrives via AGENT_EVENT notifications.
         sendResponse({ success: true, data: { started: true } });
-
-        // Keep service worker alive during the long-running task
         startKeepalive();
 
         agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal)
           .catch((err) => {
-            chrome.runtime.sendMessage({
-              type: 'AGENT_EVENT',
-              data: { type: 'TASK_ERROR', error: err.message, messages: [] }
-            }).catch(() => {});
+            if (activeTaskId === taskId) {
+              chrome.runtime.sendMessage({
+                type: 'AGENT_EVENT',
+                data: { type: 'TASK_ERROR', error: err.message }
+              }).catch((e) => { console.warn('[Agentia] Notification failed:', e.message); });
+            }
           })
           .finally(() => {
-            currentTaskController = null;
-            stopKeepalive();
+            if (activeTaskId === taskId) {
+              currentTaskController = null;
+              activeTaskId = null;
+              stopKeepalive();
+            }
           });
         break;
       }
@@ -166,7 +185,6 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'OLLAMA_MODELS': {
-        // Cloud mode has no local model list — just ping to verify auth/connectivity
         if (agentCore.useCloud) {
           try {
             await pingOllamaCloud();
@@ -179,7 +197,6 @@ async function handleMessage(message, sender, sendResponse) {
             const models = await getOllamaModels();
             sendResponse({ success: true, data: models });
           } catch (err) {
-            // Not fatal — Ollama may simply not be running yet
             sendResponse({ success: false, error: err.message });
           }
         }
@@ -206,16 +223,22 @@ async function handleMessage(message, sender, sendResponse) {
         break;
       }
 
+      case 'CHECK_RECORDING_STATUS': {
+        const rec = getActiveRecording();
+        sendResponse({ isRecording: !!rec, recordingId: rec?.id || null });
+        break;
+      }
+
       case 'RECORDING_START': {
         const recTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
-        await startRecording(recTabId, payload.name);
+        await startRecording(recTabId, payload.name, actionStore);
         sendResponse({ success: true });
         break;
       }
 
       case 'RECORDING_STOP': {
         const stopTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
-        const recording = await stopRecording(stopTabId);
+        const recording = await stopRecording(stopTabId, actionStore);
         sendResponse({ success: true, data: recording });
         break;
       }
@@ -227,7 +250,7 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'REPLAY_RECORDING': {
-        const result = await replayRecording(payload.recordingId, payload.tabId, payload.adaptive);
+        const result = await replayRecording(payload.recordingId, payload.tabId, payload.adaptive, agentCore, actionStore);
         sendResponse({ success: true, data: result });
         break;
       }
@@ -269,7 +292,6 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'CREATE_FILE': {
-        // Quick shortcut: create + open in one step
         const fileKey = `agentia_file_${Date.now()}`;
         await chrome.storage.local.set({
           [fileKey]: {
@@ -286,7 +308,6 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'FILE_CREATE': {
-        // Create file in storage, return fileKey — does NOT open a tab
         const fileKey = `agentia_file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         await chrome.storage.local.set({
           [fileKey]: {
@@ -302,7 +323,10 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'FILE_UPDATE': {
-        // Update (replace) the content of an existing file
+        if (!payload.fileKey || !payload.fileKey.startsWith('agentia_file_')) {
+          sendResponse({ success: false, error: 'Invalid fileKey: must start with agentia_file_' });
+          break;
+        }
         const existing = await chrome.storage.local.get(payload.fileKey);
         if (!existing[payload.fileKey]) {
           sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
@@ -316,14 +340,31 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'FILE_OPEN': {
-        // Open an existing file in a new tab
+        if (!payload.fileKey || !payload.fileKey.startsWith('agentia_file_')) {
+          sendResponse({ success: false, error: 'Invalid fileKey: must start with agentia_file_' });
+          break;
+        }
         const checkData = await chrome.storage.local.get(payload.fileKey);
         if (!checkData[payload.fileKey]) {
           sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
           break;
         }
         const openUrl = chrome.runtime.getURL(`viewer.html?key=${payload.fileKey}`);
-        const openedTab = await chrome.tabs.create({ url: openUrl, active: true });
+        // Retry tab creation — Chrome throws "Tabs cannot be edited right now"
+        // when the user is dragging a tab or the browser is busy
+        let openedTab = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            openedTab = await chrome.tabs.create({ url: openUrl, active: true });
+            break;
+          } catch (tabErr) {
+            if (attempt < 2 && /cannot be edited/i.test(tabErr.message)) {
+              await new Promise(r => setTimeout(r, 500 * (attempt + 1)));
+            } else {
+              throw tabErr;
+            }
+          }
+        }
         sendResponse({ success: true, data: { url: openUrl, tabId: openedTab.id } });
         break;
       }
@@ -341,27 +382,143 @@ async function handleMessage(message, sender, sendResponse) {
         break;
       }
 
-      case 'INJECT_SCRIPT': {
-        await chrome.scripting.executeScript({
-          target: { tabId: payload.tabId },
-          func: new Function(payload.code)
+      case 'GET_PAGE_INFO': {
+        const tabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        if (!tabId) throw new Error('No active tab');
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (tab && tab.url && tab.url.match(/\.pdf($|\?)/i)) {
+          sendResponse({
+            success: true,
+            data: {
+              url: tab.url,
+              title: tab.title || '',
+              isPdf: true,
+              hint: 'This is a PDF file. Use the pdf_read tool to extract text content.'
+            }
+          });
+          break;
+        }
+        const result = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const body = document.body;
+            const snippet = [];
+            for (const h of body.querySelectorAll('h1,h2,h3')) {
+              snippet.push(`<${h.tagName.toLowerCase()}>${h.textContent.trim().substring(0, 120)}</${h.tagName.toLowerCase()}>`);
+            }
+            const links = body.querySelectorAll('a[href]');
+            for (let i = 0; i < Math.min(links.length, 30); i++) {
+              const a = links[i];
+              snippet.push(`<a href="${a.href}">${a.textContent.trim().substring(0, 80)}</a>`);
+            }
+            for (const el of body.querySelectorAll('form,input,select,textarea')) {
+              const tag = el.tagName.toLowerCase();
+              const name = el.name || el.id || '';
+              const type = el.type || '';
+              snippet.push(`<${tag} name="${name}" type="${type}">`);
+            }
+            const meta = document.querySelector('meta[name="description"]');
+            if (meta) snippet.push(`<meta name="description" content="${meta.content?.substring(0, 200)}">`);
+            return {
+              url: location.href,
+              title: document.title,
+              html: snippet.join('\n').substring(0, 8000)
+            };
+          }
         });
+        sendResponse({ success: true, data: result[0].result });
+        break;
+      }
+
+      case 'PDF_READ': {
+        const pdfResult = await handlePdfRead(payload, sender);
+        sendResponse({ success: true, data: pdfResult });
+        break;
+      }
+
+      case 'WEB_SEARCH': {
+        const searchResult = await handleWebSearch(payload);
+        sendResponse({ success: true, data: searchResult });
+        break;
+      }
+
+      case 'IMAGE_SAVE': {
+        const imageResult = await handleImageSave(payload.url);
+        sendResponse({ success: true, data: imageResult });
+        break;
+      }
+
+      case 'MEMORY_GET': {
+        if (!memoryStore) await memoryStore?.load();
+        const query = payload?.query || '';
+        const allMemory = memoryStore?.getAll() || { preferences: {}, learned: [], taskMemory: [], chatMemory: [], recipes: [] };
+        if (query) {
+          const relevant = memoryStore?.buildMemoryPrompt(query) || '';
+          sendResponse({ success: true, data: { memories: allMemory, relevantContext: relevant } });
+        } else {
+          sendResponse({ success: true, data: allMemory });
+        }
+        break;
+      }
+
+      case 'MEMORY_ADD_TASK': {
+        await memoryStore?.addTaskMemory(payload.task, payload.summary, payload.success);
         sendResponse({ success: true });
         break;
       }
 
-      case 'GET_PAGE_INFO': {
-        const tabId = payload.tabId || sender.tab?.id || await getActiveTabId();
-        if (!tabId) throw new Error('No active tab');
-        const result = await chrome.scripting.executeScript({
-          target: { tabId },
-          func: () => ({
-            url: location.href,
-            title: document.title,
-            html: document.documentElement.outerHTML.substring(0, 8000)
-          })
-        });
-        sendResponse({ success: true, data: result[0].result });
+      case 'MEMORY_ADD_CHAT': {
+        await memoryStore?.addChatMemory(payload.summary, payload.topics || []);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'MEMORY_ADD_LEARNED': {
+        await memoryStore?.addLearned(payload.topic, payload.info);
+        sendResponse({ success: true, data: { topic: payload.topic, saved: true } });
+        break;
+      }
+
+      case 'MEMORY_SAVE_PREFERENCE': {
+        await memoryStore?.setPreference(payload.key, payload.value);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'MEMORY_DELETE_LEARNED': {
+        await memoryStore?.deleteLearned(payload.id);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'MEMORY_DELETE_TASK': {
+        await memoryStore?.deleteTaskMemory(payload.id);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'MEMORY_CLEAR': {
+        await memoryStore?.clear();
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'MEMORY_SAVE_RECIPE': {
+        await memoryStore?.addRecipe(payload.site, payload.task, payload.steps);
+        sendResponse({ success: true, data: { site: payload.site, task: payload.task } });
+        break;
+      }
+
+      case 'MEMORY_GET_RECIPES': {
+        const recipes = memoryStore?.data?.recipes || [];
+        const matching = payload?.site ? recipes.filter(r => r.site.toLowerCase().includes(payload.site.toLowerCase())) : recipes;
+        sendResponse({ success: true, data: matching });
+        break;
+      }
+
+      case 'MEMORY_DELETE_RECIPE': {
+        await memoryStore?.deleteRecipe(payload.id);
+        sendResponse({ success: true });
         break;
       }
 
@@ -374,9 +531,12 @@ async function handleMessage(message, sender, sendResponse) {
   }
 }
 
-// ---- Ollama ----
+// ---- Ollama API ----
 async function getOllamaModels() {
   const res = await fetch(`${agentCore.localBase}/api/tags`);
+  if (res.status === 403) {
+    throw new Error('Ollama 403 Forbidden. Çözüm: OLLAMA_ORIGINS="*" ollama serve ile başlatın.');
+  }
   if (!res.ok) throw new Error(`Ollama bağlantı hatası (${res.status})`);
   const data = await res.json();
   return data.models || [];
@@ -407,501 +567,10 @@ async function pullOllamaModel(model) {
     for (const line of lines) {
       try {
         const data = JSON.parse(line);
-        chrome.runtime.sendMessage({ type: 'PULL_PROGRESS', data }).catch(() => {});
+        chrome.runtime.sendMessage({ type: 'PULL_PROGRESS', data }).catch((e) => { console.warn('[Agentia] Pull progress notification failed:', e.message); });
       } catch {}
     }
   }
-}
-
-// ---- Tab Management ----
-async function handleTabAction(payload) {
-  const { action } = payload;
-
-  switch (action) {
-    case 'create': {
-      const newTab = await chrome.tabs.create({ url: payload.url, active: payload.active ?? true });
-      // If a URL was given, wait for the page to finish loading before returning
-      if (payload.url) {
-        await waitForTabLoad(newTab.id);
-        // Return the current (post-load) tab state so the agent sees the real URL
-        const loaded = await chrome.tabs.get(newTab.id).catch(() => newTab);
-        return loaded;
-      }
-      return newTab;
-    }
-
-    case 'close':
-      await chrome.tabs.remove(payload.tabId);
-      return { closed: true };
-
-    case 'activate':
-      await chrome.tabs.update(payload.tabId, { active: true });
-      return { activated: true };
-
-    case 'navigate': {
-      const navTabId = payload.tabId || (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id;
-      if (!navTabId) throw new Error('No tab to navigate');
-      await chrome.tabs.update(navTabId, { url: payload.url });
-      await waitForTabLoad(navTabId);
-      return { navigated: true, url: payload.url };
-    }
-
-    case 'get_all':
-      return await chrome.tabs.query({});
-
-    case 'get_active': {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-      return tabs[0] || null;
-    }
-
-    case 'screenshot': {
-      const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-      return { dataUrl };
-    }
-
-    case 'reload':
-      await chrome.tabs.reload(payload.tabId);
-      return { reloaded: true };
-
-    case 'go_back':
-      await chrome.tabs.goBack(payload.tabId);
-      return { done: true };
-
-    case 'go_forward':
-      await chrome.tabs.goForward(payload.tabId);
-      return { done: true };
-
-    default:
-      throw new Error(`Unknown tab action: ${action}`);
-  }
-}
-
-// ---- DOM Actions ----
-async function handleDomAction(payload, tabId) {
-  const { action } = payload;
-
-  // Guard: can't inject scripts into chrome:// or extension pages
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab) {
-    const url = tab.url || '';
-    if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
-      // If the tab is still at an internal URL, wait a moment for it to navigate
-      await new Promise(r => setTimeout(r, 1500));
-      const refreshed = await chrome.tabs.get(tabId).catch(() => tab);
-      const newUrl = refreshed.url || '';
-      if (newUrl.startsWith('chrome://') || newUrl.startsWith('chrome-extension://') || newUrl.startsWith('about:')) {
-        return { error: `Cannot run DOM actions on internal page (${newUrl}). Use tab_navigate to load a real webpage first.` };
-      }
-    }
-  }
-
-  const results = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: executeDomAction,
-    args: [payload]
-  });
-
-  return results[0]?.result;
-}
-
-function executeDomAction(payload) {
-  const { action, selector, value, x, y, key } = payload;
-
-  function findElement(sel) {
-    if (!sel) return null;
-    // Try multiple strategies
-    let el = document.querySelector(sel);
-    if (!el) {
-      // Try by text content
-      const all = document.querySelectorAll('button, a, input, [role="button"]');
-      for (const e of all) {
-        if (e.textContent.trim().toLowerCase().includes(sel.toLowerCase())) {
-          el = e; break;
-        }
-      }
-    }
-    return el;
-  }
-
-  switch (action) {
-    case 'click': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      el.click();
-      return { clicked: true, tag: el.tagName, text: el.textContent.trim().substring(0, 50) };
-    }
-
-    case 'type': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-
-      const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
-
-      if (isContentEditable) {
-        // Draft.js / React contenteditable (Twitter, Gmail compose, etc.)
-        // Step 1: Focus and move cursor to end
-        el.focus();
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        range.collapse(false); // cursor to end
-        const sel = window.getSelection();
-        sel.removeAllRanges();
-        sel.addRange(range);
-
-        // Step 2: Fire beforeinput (Draft.js listens to this)
-        el.dispatchEvent(new InputEvent('beforeinput', {
-          inputType: 'insertText',
-          data: value,
-          bubbles: true,
-          cancelable: true
-        }));
-
-        // Step 3: Actually insert the text via execCommand (synchronous, triggers React)
-        const inserted = document.execCommand('insertText', false, value);
-
-        // Step 4: Fire input event for any remaining listeners
-        el.dispatchEvent(new InputEvent('input', {
-          inputType: 'insertText',
-          data: value,
-          bubbles: true
-        }));
-
-        return { typed: true, method: 'contenteditable', execCommand: inserted, text: value };
-      } else {
-        // Standard input/textarea: use React's native setter trick
-        el.focus();
-        const nativeProto = el.tagName === 'TEXTAREA'
-          ? window.HTMLTextAreaElement.prototype
-          : window.HTMLInputElement.prototype;
-        const nativeSetter = Object.getOwnPropertyDescriptor(nativeProto, 'value')?.set;
-        if (nativeSetter) {
-          nativeSetter.call(el, value);
-        } else {
-          el.value = value;
-        }
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        return { typed: true, method: 'input', text: value };
-      }
-    }
-
-    case 'clear': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      el.focus();
-      if (el.isContentEditable || el.getAttribute('contenteditable') === 'true') {
-        document.execCommand('selectAll', false, null);
-        document.execCommand('delete', false, null);
-      } else {
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-          el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
-          'value'
-        )?.set;
-        if (nativeInputValueSetter) nativeInputValueSetter.call(el, '');
-        else el.value = '';
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      return { cleared: true };
-    }
-
-    case 'scroll': {
-      if (selector) {
-        const el = findElement(selector);
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      } else {
-        window.scrollBy({ top: y || 300, left: x || 0, behavior: 'smooth' });
-      }
-      return { scrolled: true };
-    }
-
-    case 'hover': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-      el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-      return { hovered: true };
-    }
-
-    case 'select': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      if (el.tagName === 'SELECT') {
-        el.value = value;
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-      return { selected: true };
-    }
-
-    case 'keypress': {
-      const el = findElement(selector) || document.activeElement;
-      el.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
-      el.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
-      return { keypressed: key };
-    }
-
-    case 'get_text': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      return { text: el.textContent.trim() };
-    }
-
-    case 'get_value': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      return { value: el.value };
-    }
-
-    case 'get_attr': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      return { value: el.getAttribute(payload.attr) };
-    }
-
-    case 'screenshot_element': {
-      const el = findElement(selector);
-      if (!el) return { error: `Element not found: ${selector}` };
-      const rect = el.getBoundingClientRect();
-      return { rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height } };
-    }
-
-    case 'exists': {
-      const el = findElement(selector);
-      return { exists: !!el };
-    }
-
-    case 'query_all': {
-      const els = document.querySelectorAll(selector);
-      return {
-        count: els.length,
-        elements: Array.from(els).slice(0, 20).map(el => ({
-          tag: el.tagName,
-          id: el.id,
-          className: el.className,
-          text: el.textContent.trim().substring(0, 100),
-          href: el.href,
-          value: el.value
-        }))
-      };
-    }
-
-    case 'get_dom_summary': {
-      const interactive = document.querySelectorAll('a, button, input, select, textarea, [role="button"], [onclick]');
-      return {
-        url: location.href,
-        title: document.title,
-        interactive: Array.from(interactive).slice(0, 50).map(el => ({
-          tag: el.tagName,
-          id: el.id,
-          name: el.name,
-          type: el.type,
-          text: el.textContent.trim().substring(0, 80),
-          href: el.href,
-          placeholder: el.placeholder,
-          selector: el.id ? `#${el.id}` : el.name ? `[name="${el.name}"]` : el.className ? `.${el.className.split(' ')[0]}` : el.tagName.toLowerCase()
-        }))
-      };
-    }
-
-    case 'wait_for': {
-      // Return a promise-like result - actual wait handled by content script
-      const el = document.querySelector(selector);
-      return { found: !!el };
-    }
-
-    case 'extract_data': {
-      const result = {};
-      if (payload.fields) {
-        for (const [key, sel] of Object.entries(payload.fields)) {
-          const el = document.querySelector(sel);
-          result[key] = el ? el.textContent.trim() : null;
-        }
-      }
-      return result;
-    }
-
-    default:
-      return { error: `Unknown DOM action: ${action}` };
-  }
-}
-
-// ---- Recording ----
-let activeRecording = null;
-
-async function startRecording(tabId, name) {
-  const recordingId = `rec_${Date.now()}`;
-  activeRecording = {
-    id: recordingId,
-    name: name || `Kayıt ${new Date().toLocaleString('tr-TR')}`,
-    tabId,
-    startUrl: '',
-    events: [],
-    startTime: Date.now()
-  };
-
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs[0]) activeRecording.startUrl = tabs[0].url;
-
-  await chrome.scripting.executeScript({
-    target: { tabId },
-    func: () => {
-      window.__agentiaRecording = true;
-    }
-  });
-
-  chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', recordingId });
-  actionStore.setActiveRecording(activeRecording);
-
-  chrome.runtime.sendMessage({ type: 'RECORDING_STATUS', status: 'started', recordingId }).catch(() => {});
-  return recordingId;
-}
-
-async function stopRecording(tabId) {
-  if (!activeRecording) return null;
-
-  chrome.tabs.sendMessage(tabId || activeRecording.tabId, { type: 'STOP_RECORDING' }).catch(() => {});
-
-  const recording = { ...activeRecording };
-  recording.endTime = Date.now();
-  recording.duration = recording.endTime - recording.startTime;
-
-  await actionStore.saveRecording(recording);
-  activeRecording = null;
-
-  chrome.runtime.sendMessage({ type: 'RECORDING_STATUS', status: 'stopped', recording }).catch(() => {});
-  return recording;
-}
-
-function toggleRecording(tab) {
-  if (activeRecording) {
-    stopRecording(tab.id);
-  } else {
-    startRecording(tab.id, null);
-  }
-}
-
-// ---- Replay ----
-async function replayRecording(recordingId, tabId, adaptive = false) {
-  const recording = actionStore.getRecording(recordingId);
-  if (!recording) throw new Error('Kayıt bulunamadı');
-
-  let targetTabId = tabId;
-  if (!targetTabId) {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    targetTabId = tabs[0]?.id;
-  }
-
-  if (adaptive) {
-    return await agentCore.adaptiveReplay(recording, targetTabId);
-  }
-
-  const results = [];
-  for (const event of recording.events) {
-    try {
-      const result = await executeRecordedEvent(event, targetTabId);
-      results.push({ event, result, success: true });
-      await sleep(event.delay || 500);
-    } catch (err) {
-      results.push({ event, error: err.message, success: false });
-    }
-  }
-
-  return { results, success: results.every(r => r.success) };
-}
-
-async function executeRecordedEvent(event, tabId) {
-  switch (event.type) {
-    case 'navigate':
-      await chrome.tabs.update(tabId, { url: event.url });
-      await waitForTabLoad(tabId);
-      return { navigated: event.url };
-
-    case 'click':
-    case 'type':
-    case 'scroll':
-    case 'select':
-    case 'keypress':
-      return await handleDomAction({ ...event, action: event.type }, tabId);
-
-    case 'tab_create':
-      return await handleTabAction({ action: 'create', url: event.url });
-
-    case 'tab_close':
-      return await handleTabAction({ action: 'close', tabId: event.tabId });
-
-    default:
-      return { skipped: event.type };
-  }
-}
-
-function waitForTabLoad(tabId) {
-  return new Promise((resolve) => {
-    const listener = (id, info) => {
-      if (id === tabId && info.status === 'complete') {
-        chrome.tabs.onUpdated.removeListener(listener);
-        resolve();
-      }
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    setTimeout(resolve, 10000); // Fallback timeout
-  });
-}
-
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
-
-async function getActiveTabId() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs[0]?.id || null;
-}
-
-// ---- Settings ----
-async function getSettings() {
-  const data = await chrome.storage.local.get('agentia_settings');
-  return data.agentia_settings || {
-    ollamaUrl: 'http://localhost:11434',
-    useCloud: true,
-    apiKey: '',
-    model: 'llama3.2',
-    temperature: 0.7,
-    maxTokens: 4096,
-    systemPrompt: '',
-    autoRecord: false,
-    replayDelay: 500,
-    maxIterations: 60
-  };
-}
-
-async function saveSettings(settings) {
-  await chrome.storage.local.set({ agentia_settings: settings });
-}
-
-// ---- Task History ----
-async function getTaskHistory() {
-  const data = await chrome.storage.local.get('agentia_task_history');
-  return data.agentia_task_history || [];
-}
-
-async function saveTaskHistory(entry) {
-  const history = await getTaskHistory();
-  // Prepend new entry, keep last 50
-  history.unshift({
-    id: `task_${Date.now()}`,
-    task: entry.task,
-    result: entry.result,
-    log: entry.log || [],
-    messages: entry.messages || [],
-    createdAt: Date.now(),
-    success: entry.success ?? true
-  });
-  if (history.length > 50) history.splice(50);
-  await chrome.storage.local.set({ agentia_task_history: history });
-}
-
-async function deleteTaskHistory(id) {
-  const history = await getTaskHistory();
-  const filtered = history.filter(h => h.id !== id);
-  await chrome.storage.local.set({ agentia_task_history: filtered });
 }
 
 // ---- Side Panel ----
@@ -909,7 +578,22 @@ chrome.action.onClicked.addListener((tab) => {
   chrome.sidePanel.open({ tabId: tab.id });
 });
 
-chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch((e) => { console.warn('[Agentia] Side panel behavior setup failed:', e.message); });
+
+// ---- Re-inject recording flag on tab navigation ----
+chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+  const rec = getActiveRecording();
+  if (info.status === 'complete' && rec && rec.tabId === tabId) {
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => { window.__agentiaRecording = true; }
+    }).catch(() => {});
+    chrome.tabs.sendMessage(tabId, {
+      type: 'START_RECORDING',
+      recordingId: rec.id
+    }).catch(() => {});
+  }
+});
 
 // Start — keep the promise so message handler can await it
 initPromise = init().catch(console.error);

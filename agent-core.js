@@ -1,496 +1,7 @@
 // AgentCore — Ollama local + cloud, native tool calling, adaptive replay
 
-// Native tool definitions for Ollama's tools array
-const AGENT_TOOLS = [
-  {
-    type: 'function',
-    function: {
-      name: 'tab_create',
-      description: 'Open a new browser tab',
-      parameters: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'URL to open (optional)' },
-          active: { type: 'boolean', description: 'Make tab active (default true)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_close',
-      description: 'Close a browser tab',
-      parameters: {
-        type: 'object',
-        required: ['tabId'],
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID to close' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_navigate',
-      description: 'Navigate to a URL in a tab',
-      parameters: {
-        type: 'object',
-        required: ['url'],
-        properties: {
-          url: { type: 'string', description: 'URL to navigate to' },
-          tabId: { type: 'number', description: 'Tab ID (default: active tab)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_get_active',
-      description: 'Get the currently active tab info (id, url, title)',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_get_all',
-      description: 'Get all open tabs',
-      parameters: { type: 'object', properties: {} }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_reload',
-      description: 'Reload a tab',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number', description: 'Tab ID (default: active tab)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_back',
-      description: 'Go back in browser history',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'tab_forward',
-      description: 'Go forward in browser history',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_click',
-      description: 'Click an element on the page using a CSS selector',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string', description: 'CSS selector for the element to click' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_type',
-      description: 'Type text into an input field',
-      parameters: {
-        type: 'object',
-        required: ['selector', 'value'],
-        properties: {
-          selector: { type: 'string', description: 'CSS selector for the input' },
-          value: { type: 'string', description: 'Text to type' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_clear',
-      description: 'Clear an input field',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_scroll',
-      description: 'Scroll the page or scroll to an element',
-      parameters: {
-        type: 'object',
-        properties: {
-          selector: { type: 'string', description: 'Scroll to this element (optional)' },
-          y: { type: 'number', description: 'Pixels to scroll vertically (if no selector)' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_hover',
-      description: 'Hover over an element',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_select',
-      description: 'Select an option from a <select> dropdown',
-      parameters: {
-        type: 'object',
-        required: ['selector', 'value'],
-        properties: {
-          selector: { type: 'string' },
-          value: { type: 'string', description: 'Option value to select' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_keypress',
-      description: 'Press a keyboard key (e.g. Enter, Escape, Tab)',
-      parameters: {
-        type: 'object',
-        required: ['key'],
-        properties: {
-          key: { type: 'string', description: 'Key name: Enter, Escape, Tab, ArrowDown, etc.' },
-          selector: { type: 'string', description: 'Focus this element first (optional)' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_get_text',
-      description: 'Get the text content of an element',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_exists',
-      description: 'Check if an element exists on the page',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_query_all',
-      description: 'Find all elements matching a CSS selector',
-      parameters: {
-        type: 'object',
-        required: ['selector'],
-        properties: {
-          selector: { type: 'string' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_get_summary',
-      description: 'Get a summary of all interactive elements on the current page (buttons, links, inputs). Use this before clicking to find correct selectors.',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'dom_extract',
-      description: 'Extract multiple data fields from the page using CSS selectors',
-      parameters: {
-        type: 'object',
-        required: ['fields'],
-        properties: {
-          fields: {
-            type: 'object',
-            description: 'Map of field name to CSS selector, e.g. {"title": "h1", "price": ".price"}'
-          },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'page_get_info',
-      description: 'Get current page URL, title, and a snippet of HTML',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'wait',
-      description: 'Wait for a specified number of milliseconds',
-      parameters: {
-        type: 'object',
-        required: ['ms'],
-        properties: {
-          ms: { type: 'number', description: 'Milliseconds to wait (max 10000)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'recording_start',
-      description: 'Start recording browser actions',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'Name for this recording' },
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'recording_stop',
-      description: 'Stop the current recording',
-      parameters: {
-        type: 'object',
-        properties: {
-          tabId: { type: 'number' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'replay',
-      description: 'Replay a saved recording',
-      parameters: {
-        type: 'object',
-        required: ['recordingId'],
-        properties: {
-          recordingId: { type: 'string' },
-          tabId: { type: 'number' },
-          adaptive: { type: 'boolean', description: 'Use AI to adapt selectors if elements are not found' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'create_file',
-      description: 'Quick shortcut: create a file AND immediately open it in a new tab in one step. Use this only for final one-shot outputs. For progressive research tasks use file_create + file_update + file_open instead.',
-      parameters: {
-        type: 'object',
-        required: ['name', 'content'],
-        properties: {
-          name: { type: 'string', description: 'File name, e.g. "Search Results"' },
-          content: { type: 'string', description: 'Full file content' },
-          type: {
-            type: 'string',
-            enum: ['text', 'markdown', 'html', 'json'],
-            description: 'Content type'
-          }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_create',
-      description: 'Create a new file in storage and return its fileKey. Use at the START of any research/report task to establish the page skeleton. Returns { fileKey } — save this for file_update and file_open calls.',
-      parameters: {
-        type: 'object',
-        required: ['name', 'content', 'type'],
-        properties: {
-          name: { type: 'string', description: 'Display name, e.g. "Europe Hidden Gems Guide"' },
-          content: { type: 'string', description: 'Initial HTML/text content — can be a skeleton that you will fill in with file_update calls' },
-          type: {
-            type: 'string',
-            enum: ['html', 'markdown', 'json', 'text'],
-            description: 'Use html for rich visual pages with images and styling'
-          }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_update',
-      description: 'Replace the content of a previously created file. Call this progressively as you research — each call replaces the full content, so always include all accumulated content. Use to build the page incrementally.',
-      parameters: {
-        type: 'object',
-        required: ['fileKey', 'content'],
-        properties: {
-          fileKey: { type: 'string', description: 'The fileKey returned by file_create' },
-          content: { type: 'string', description: 'New complete content (replaces previous version entirely)' }
-        }
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'file_open',
-      description: 'Open a previously created/updated file in a new browser tab. Call this as the LAST step after all file_update calls are done.',
-      parameters: {
-        type: 'object',
-        required: ['fileKey'],
-        properties: {
-          fileKey: { type: 'string', description: 'The fileKey returned by file_create' }
-        }
-      }
-    }
-  }
-];
-
-// Base system prompt (date/time injected at runtime in runTask)
-const AGENT_SYSTEM_PROMPT_BASE = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient and thorough.
-
-## Current Information
-[DATE_TIME_INJECTED_HERE]
-
-IMPORTANT: Your knowledge has a cutoff date. For any recent events, current prices, latest products, trending topics, or time-sensitive information:
-- ALWAYS browse the web to get current data
-- Do NOT rely on your training data
-- Search for the latest news, reviews, and information
-
-## Core Rules
-- tab_create and tab_navigate both wait for the page to fully load before returning — you do NOT need an extra wait() call after them. Go directly to DOM actions.
-- tab_create returns { tabId, url, title } — ALWAYS save this tabId and pass it to every subsequent tool call on that tab. Never call dom_* without a tabId after opening a new tab.
-- Call dom_get_summary ONCE per page to understand the layout — do not repeat it
-- Never call page_get_info and dom_get_summary on the same page — pick one
-- For links/products: use href values from dom_query_all with tab_navigate instead of dom_click
-- When you have enough data to answer a simple question, stop browsing and respond
-
-## Web Search
-Prefer DuckDuckGo — it exposes real links without obfuscation:
-  tab_navigate(tabId, "https://duckduckgo.com/?q=your+query")
-  dom_query_all({ selector: "article[data-testid='result'] a[data-testid='result-title-a']", tabId })
-  → each element has .text (title) and .href (real URL)
-
-For Google search results:
-  dom_query_all({ selector: "#search .g h3", tabId }) → titles
-  dom_query_all({ selector: "#search .g a:first-of-type", tabId }) → links (use .href)
-  Avoid selector "div.g a[href^='http']" — it returns 0 results on current Google DOM.
-
-## File & Report Tasks (MANDATORY)
-When the user asks for a report, guide, list, HTML page, or any document:
-
-**ALWAYS use Progressive Mode (file_create → research → file_update → file_open):**
-1. file_create(name, skeletonHtml, type='html') → returns { fileKey }. SAVE THIS KEY.
-2. Research: browse, extract data, collect snippets.
-3. file_update(fileKey, accumulatedHtml) after EACH meaningful source — always send FULL HTML so far.
-4. file_open(fileKey) as VERY LAST step — only when ALL research is done.
-
-Why progressive:
-- You get live feedback (viewer auto-refreshes every 3 seconds)
-- If max iterations hit, file is already filled with partial results
-- User can watch progress in real-time
-
-**Rules:**
-- NEVER say "I'll create the file now" — just call file_create immediately
-- NEVER skip file_create/file_update/file_open — they are mandatory for all document tasks
-- After each source/finding, call file_update with the FULL accumulated HTML (includes all previous items + new item)
-- ALWAYS end with file_open(fileKey) before task completes
-
-## HTML File Quality
-When creating HTML reports:
-- Use inline CSS with a beautiful modern design (gradient headers, card grid layout, shadows)
-- For location/product/travel pages: each item gets a card with image (use real URLs from research), title, description, and details
-- Include a page header with title and subtitle
-- Images: use <img src="URL"> with real image URLs found during research (from unsplash, wikipedia, travel sites, etc.)
-- Make it visually rich — this is what the user will see in their browser
-
-## Twitter/X
-- (1) dom_click the contenteditable box, (2) wait 500ms, (3) dom_type text, (4) wait 500ms, (5) dom_click [data-testid="tweetButtonInline"], (6) wait 2000ms, (7) verify with dom_exists
-- contenteditable elements (Twitter, Gmail etc.) work fine with dom_type
-
-## Other
-- For product listings: dom_query_all with "[data-component-type='s-search-result'] .a-size-base-plus" for names
-- If typing has no effect: dom_click the field first, wait 300ms, then dom_type`;
-
+import { AGENT_TOOLS } from './tools.js';
+import { AGENT_SYSTEM_PROMPT_BASE, buildSystemPrompt } from './prompts.js';
 export class AgentCore {
   constructor(ollamaBase) {
     this.localBase = ollamaBase || 'http://localhost:11434';
@@ -501,7 +12,18 @@ export class AgentCore {
     this.systemPrompt = '';
     this.apiKey = '';          // For cloud auth
     this.useCloud = false;     // Toggle local vs cloud
-    this.maxToolIterations = 60;
+    this.maxToolIterations = 0; // 0 = no limit, user stops manually via STOP_TASK
+    this.thinkingMode = 'off'; // 'off', 'low', 'medium', 'high'
+    this.visionEnabled = 'auto'; // 'auto', 'on', 'off'
+    this.memoryStore = null; // Set by background.js after init
+    this._visionCache = null; // Cache for model vision capability check
+  }
+
+  // Build memory context string for system prompt injection
+  _buildMemoryPrompt(taskDescription) {
+    if (!this.memoryStore) return '';
+    const context = this.memoryStore.buildMemoryPrompt(taskDescription || '');
+    return context ? '\n\n## Your Memories (from past sessions)\n' + context : '';
   }
 
   updateSettings(settings) {
@@ -513,7 +35,12 @@ export class AgentCore {
     if (settings.systemPrompt !== undefined) this.systemPrompt = settings.systemPrompt;
     if (settings.apiKey !== undefined) this.apiKey = settings.apiKey;
     if (settings.useCloud !== undefined) this.useCloud = settings.useCloud;
-    if (settings.maxIterations) this.maxToolIterations = settings.maxIterations;
+    if (settings.maxIterations !== undefined && settings.maxIterations !== null) this.maxToolIterations = settings.maxIterations;
+    if (settings.thinkingMode !== undefined) this.thinkingMode = settings.thinkingMode;
+    if (settings.visionEnabled !== undefined) {
+      this.visionEnabled = settings.visionEnabled;
+      this._visionCache = null; // Reset cache when setting changes
+    }
   }
 
   // Resolved API base (local or cloud)
@@ -530,22 +57,227 @@ export class AgentCore {
     return h;
   }
 
+  // Detect if current model supports vision/multimodal input
+  // Async version — checks Ollama API then caches result
+  async _checkVisionCapability() {
+    // Manual override takes priority
+    if (this.visionEnabled === 'on') { this._visionCache = true; return; }
+    if (this.visionEnabled === 'off') { this._visionCache = false; return; }
+
+    let result = false;
+
+    // 1. Try Ollama API — /api/show returns model capabilities
+    try {
+      const res = await fetch(`${this.apiBase}/api/show`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({ name: this.model })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const info = JSON.stringify(data).toLowerCase();
+        if (info.includes('vision') || info.includes('clip') || info.includes('image') || info.includes('multimodal')) {
+          result = true;
+        }
+        if (data.projector_architecture) result = true;
+      }
+    } catch {}
+
+    // 2. Fallback: heuristic model name check
+    if (!result) {
+      result = this._isVisionByModelName();
+    }
+
+    this._visionCache = result;
+  }
+
+  // Synchronous heuristic check — used when API check isn't available yet
+  _isVisionByModelName() {
+    const name = this.model.toLowerCase();
+    const visionFamilies = ['llava', 'bakllava', 'pixtral', 'minicpm-v', 'internvl', 'cogvlm', 'moondream'];
+    const visionModels = [
+      'llama4', 'llama-4',
+      'llama3.2-vision', 'llama-3.2-vision',
+      'gemma3', 'gemma4', 'gemma-3', 'gemma-4',
+      'qwen2.5-vl', 'qwen2-vl', 'qwen2.5vl',
+      'phi-3.5-vision', 'phi3.5-vision',
+      'mistral-small3',
+    ];
+    if (visionModels.some(m => name.includes(m))) return true;
+    if (visionFamilies.some(f => name.includes(f))) return true;
+    if (name.includes('vision') || name.includes('-vl') || name.includes('mm')) return true;
+    return false;
+  }
+
+  // Synchronous vision check — uses cached result from _checkVisionCapability
+  _isVisionModel() {
+    if (this.visionEnabled === 'on') return true;
+    if (this.visionEnabled === 'off') return false;
+    if (this._visionCache !== null) return this._visionCache;
+    // No cache yet — fall back to name heuristic
+    return this._isVisionByModelName();
+  }
+
+  // Compress screenshot: resize to max 768px wide, JPEG quality 50
+  // Uses OffscreenCanvas (available in Chrome 99+ service workers)
+  async _compressScreenshot(dataUrl) {
+    if (!dataUrl || !dataUrl.startsWith('data:image')) return null;
+
+    const MAX_WIDTH = 768;
+    const JPEG_QUALITY = 0.5;
+
+    try {
+      // Decode the data URL into an ImageBitmap
+      const response = await fetch(dataUrl);
+      const blob = await response.blob();
+      const bitmap = await createImageBitmap(blob);
+
+      const origW = bitmap.width;
+      const origH = bitmap.height;
+
+      // Calculate resize dimensions
+      let targetW = origW;
+      let targetH = origH;
+      if (origW > MAX_WIDTH) {
+        targetW = MAX_WIDTH;
+        targetH = Math.round(origH * (MAX_WIDTH / origW));
+      }
+
+      // Resize and re-encode as JPEG
+      const canvas = new OffscreenCanvas(targetW, targetH);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+      bitmap.close();
+
+      const jpegBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: JPEG_QUALITY });
+
+      // Convert blob to base64
+      const buffer = await jpegBlob.arrayBuffer();
+      const base64 = btoa(String.fromCharCode(...new Uint8Array(buffer)));
+
+      // Safety: reject if still too large (> 800KB base64 = ~600KB image)
+      if (base64.length > 800000) {
+        console.warn(`[Agentia] Screenshot still too large after compression: ${Math.round(base64.length / 1024)}KB, skipping`);
+        return null;
+      }
+
+      return base64;
+    } catch (err) {
+      console.warn('[Agentia] Screenshot compression failed:', err.message);
+      // Fallback: strip prefix and return raw — may be too large
+      const raw = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+      return raw.length > 800000 ? null : raw;
+    }
+  }
+
+  // Build Ollama API options including thinking/reasoning settings
+  _buildOptions(extraOpts = {}) {
+    const opts = {
+      temperature: extraOpts.temperature ?? this.temperature,
+      num_predict: extraOpts.num_predict ?? this.maxTokens
+    };
+
+    // Thinking mode: controls reasoning effort
+    // 'off' = no thinking (default, fastest) — explicitly disable
+    // 'low'/'medium'/'high' = enables thinking with increasing budget
+    if (this.thinkingMode && this.thinkingMode !== 'off') {
+      const thinkBudgets = { low: 1024, medium: 4096, high: 16384 };
+      opts.think = true;
+      opts.num_ctx = thinkBudgets[this.thinkingMode] || 4096;
+    } else {
+      // Explicitly disable thinking — some reasoning models think by default
+      opts.think = false;
+    }
+
+    return opts;
+  }
+
+  // ---- Fetch with retry for transient errors (503, 429, network) ----
+  // signal: optional AbortSignal to cancel in-flight requests immediately
+  async _fetchWithRetry(url, options, maxRetries = 3, signal = null) {
+    // If caller provided a signal, merge it into options so fetch can be aborted
+    const fetchOpts = signal ? { ...options, signal } : options;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // If signal was already aborted before this attempt, stop immediately
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+      try {
+        const res = await fetch(url, fetchOpts);
+        // 403 from local Ollama = CORS/origin issue — provide clear guidance
+        if (res.status === 403 && !this.useCloud) {
+          throw new Error(
+            'Ollama 403 Forbidden hatası. Çözüm: Terminalde şu komutla Ollama\'yı yeniden başlatın:\n' +
+            '  OLLAMA_ORIGINS="*" ollama serve\n' +
+            'veya environment variable olarak:\n' +
+            '  export OLLAMA_ORIGINS="*"\n' +
+            'Bu, Chrome extension\'ın Ollama\'ya erişmesine izin verir.'
+          );
+        }
+        if (res.status === 500 || res.status === 503 || res.status === 429 || res.status === 502) {
+          if (attempt < maxRetries) {
+            const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+            this._notify({ type: 'AGENT_THOUGHT', content: `⏳ Sunucu geçici hatası (${res.status}), ${delay / 1000}s sonra tekrar deneniyor (${attempt}/${maxRetries})...` });
+            await this._sleepWithSignal(delay, signal);
+            if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+            continue;
+          }
+        }
+        return res;
+      } catch (err) {
+        // AbortError — rethrow immediately, no retry
+        if (err.name === 'AbortError') throw err;
+        // Network errors (ECONNREFUSED, timeout, etc.) — also retry
+        if (attempt < maxRetries) {
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 8000);
+          this._notify({ type: 'AGENT_THOUGHT', content: `⏳ Bağlantı hatası, ${delay / 1000}s sonra tekrar deneniyor (${attempt}/${maxRetries})...` });
+          await this._sleepWithSignal(delay, signal);
+          if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+          continue;
+        }
+        throw err;
+      }
+    }
+    // Should not reach here, but just in case
+    return fetch(url, fetchOpts);
+  }
+
+  // Sleep that short-circuits when the signal is aborted
+  async _sleepWithSignal(ms, signal) {
+    if (!signal) {
+      await new Promise(r => setTimeout(r, ms));
+      return;
+    }
+    let timer, abortHandler;
+    try {
+      await new Promise((resolve, reject) => {
+        timer = setTimeout(resolve, ms);
+        abortHandler = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')); };
+        signal.addEventListener('abort', abortHandler, { once: true });
+      });
+    } catch (e) {
+      if (e.name === 'AbortError') throw e;
+    }
+    // Timeout won: clean up abort listener
+    if (abortHandler) signal.removeEventListener('abort', abortHandler);
+  }
+
   // ---- Plain Chat (no tools) ----
   async chat(messages, tabId) {
     const allMessages = this._withSystem(messages);
 
-    const res = await fetch(`${this.apiBase}/api/chat`, {
+    const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
         model: this.model,
         messages: allMessages,
         stream: false,
-        options: { temperature: this.temperature, num_predict: this.maxTokens }
+        options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
     const data = await res.json();
     return data.message?.content || '';
   }
@@ -554,18 +286,18 @@ export class AgentCore {
   async streamChat(messages, tabId, onChunk) {
     const allMessages = this._withSystem(messages);
 
-    const res = await fetch(`${this.apiBase}/api/chat`, {
+    const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
         model: this.model,
         messages: allMessages,
         stream: true,
-        options: { temperature: this.temperature, num_predict: this.maxTokens }
+        options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -580,6 +312,11 @@ export class AgentCore {
         try {
           const data = JSON.parse(line);
           const token = data.message?.content || '';
+          // Thinking/reasoning content — only forward if thinking mode is enabled
+          const thinking = (this.thinkingMode && this.thinkingMode !== 'off') ? (data.message?.thinking || '') : '';
+          if (thinking) {
+            onChunk({ token: '', thinking, done: false });
+          }
           if (token) {
             fullContent += token;
             onChunk({ token, done: false });
@@ -601,10 +338,11 @@ export class AgentCore {
     let messages;
 
     // Inject current date/time into system prompt
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-US');
-    const systemPrompt = AGENT_SYSTEM_PROMPT_BASE.replace('[DATE_TIME_INJECTED_HERE]', `Today's date: ${dateStr}\nCurrent time: ${timeStr}`);
+    const systemPrompt = buildSystemPrompt(
+      AGENT_SYSTEM_PROMPT_BASE,
+      this.systemPrompt,
+      this._buildMemoryPrompt(taskDescription)
+    );
 
     if (existingMessages && existingMessages.length > 0) {
       // Continue existing session — append new user turn
@@ -618,6 +356,8 @@ export class AgentCore {
 
     const log = [];
     let iterations = 0;
+    let consecutiveDomFailures = 0;  // stuck detection counter
+    let pendingScreenshot = null;     // base64 image from last tab_screenshot (sent to vision models)
 
     // File tracking — ensure file_open is always called when a file was created
     let activeFileKey = null;   // fileKey from the most recent file_create call
@@ -629,16 +369,89 @@ export class AgentCore {
     // Used to build the final HTML if the model never called file_update
     const researchBuffer = [];
 
+    // ── Restore file tracking and research buffer from prior session ──────
+    // When continuing a task, scan existingMessages to recover state that
+    // would otherwise be lost (activeFileKey, researchBuffer entries, etc.)
+    if (existingMessages && existingMessages.length > 0) {
+      let restoredUrl = '';
+      // Build a map of tool call names from assistant messages to match
+      // with tool result messages that may lack a name field (older format)
+      const toolCallNames = [];  // ordered list of tool names from assistant messages
+      for (const msg of existingMessages) {
+        if (msg.role === 'assistant' && msg.tool_calls) {
+          for (const tc of msg.tool_calls) {
+            if (tc.function?.name) toolCallNames.push(tc.function.name);
+          }
+        }
+      }
+      let toolCallIdx = 0;
+      for (const msg of existingMessages) {
+        // Recover current page URL from navigate/create tool calls
+        if (msg.role === 'tool') {
+          // Get tool name: prefer msg.name, fall back to ordered tool_calls list
+          let toolName = msg.name || null;
+          if (!toolName && toolCallIdx < toolCallNames.length) {
+            toolName = toolCallNames[toolCallIdx];
+          }
+          if (msg.name || msg.content) toolCallIdx++;  // advance past this tool result
+
+          if (!toolName) continue;
+
+          let parsed = null;
+          try {
+            parsed = typeof msg.content === 'string' ? JSON.parse(msg.content) : msg.content;
+          } catch { parsed = null; }
+
+          if ((toolName === 'tab_navigate' || toolName === 'tab_create') && parsed) {
+            if (parsed?.url) restoredUrl = parsed.url;
+          }
+          // Rebuild researchBuffer from tool results in message history
+          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && parsed) {
+            let snippet = '';
+            if (parsed.text) snippet = parsed.text;
+            else if (parsed.content) snippet = parsed.content;
+            else if (parsed.results) snippet = parsed.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
+            else if (parsed.elements) snippet = parsed.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
+            else if (parsed.pages) snippet = parsed.pages.map(p => `[Page ${p.page}] ${p.text}`).join('\n');
+            else if (parsed.url) snippet = `[${parsed.title}](${parsed.url})`;
+            if (snippet.length > 40) {
+              researchBuffer.push({ url: restoredUrl, text: snippet.slice(0, 3000) });
+            }
+          }
+          // Recover file tracking state
+          if (toolName === 'file_create' && parsed) {
+            if (parsed?.fileKey) {
+              activeFileKey = parsed.fileKey;
+              fileUpdateCount = 0;
+              fileOpened = false;
+            }
+          } else if (toolName === 'file_update') {
+            fileUpdateCount++;
+          } else if (toolName === 'file_open') {
+            fileOpened = true;
+          } else if (toolName === 'create_file' && parsed) {
+            if (parsed?.fileKey) {
+              activeFileKey = parsed.fileKey;
+              fileOpened = true;
+            }
+          }
+        }
+      }
+    }
+
     this._notify({ type: 'TASK_START', task: taskDescription });
 
-    while (iterations < this.maxToolIterations) {
+    // Pre-check vision capability via Ollama API (async) — caches result for sync use
+    await this._checkVisionCapability();
+
+    while (!this.maxToolIterations || iterations < this.maxToolIterations) {
       // Check abort signal before each LLM call
       if (signal?.aborted) {
         this._notify({ type: 'TASK_STOPPED', messages });
         this._bgMsg('SAVE_TASK_HISTORY', {
           task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
           log, messages, success: false
-        }).catch(() => {});
+        }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
         return { success: false, error: 'Durduruldu', log, messages };
       }
 
@@ -649,7 +462,7 @@ export class AgentCore {
       if (activeFileKey && !fileOpened && iterations > 0 && iterations % 6 === 0 && fileUpdateCount === 0 && researchBuffer.length >= 1) {
         this._notify({ type: 'AGENT_THOUGHT', content: `📄 Auto-checkpoint: ${researchBuffer.length} kaynak bulundu, dosyaya yazılıyor...` });
         try {
-          const partialHtml = await this._buildFinalHtml(taskDescription, '', researchBuffer);
+          const partialHtml = await this._buildFinalHtml(taskDescription, '', researchBuffer, signal);
           if (partialHtml) {
             await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: partialHtml });
             fileUpdateCount++;
@@ -668,21 +481,51 @@ export class AgentCore {
 
       iterations++;
 
-      const res = await fetch(`${this.apiBase}/api/chat`, {
-        method: 'POST',
-        headers: this._headers(),
-        body: JSON.stringify({
-          model: this.model,
-          messages,
-          tools: AGENT_TOOLS,
-          stream: false,
-          options: { temperature: 0.2, num_predict: Math.max(this.maxTokens, 8192) }
-        })
-      });
+      // ── Inject screenshot into last user/tool message for vision models ──────
+      let visionMessages = messages;
+      if (pendingScreenshot && this._isVisionModel()) {
+        visionMessages = messages.map((m, i) => {
+          if (i === messages.length - 1 && (m.role === 'user' || m.role === 'tool')) {
+            return { ...m, images: [pendingScreenshot] };
+          }
+          return m;
+        });
+        pendingScreenshot = null;
+      }
 
-      if (!res.ok) throw new Error(`Ollama error ${res.status}: ${await res.text()}`);
-      const data = await res.json();
-      const assistantMsg = data.message;
+      let data, assistantMsg;
+      try {
+        const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
+          method: 'POST',
+          headers: this._headers(),
+          body: JSON.stringify({
+            model: this.model,
+            messages: visionMessages,
+            tools: AGENT_TOOLS,
+            stream: false,
+            options: this._buildOptions({ temperature: 0.2, num_predict: Math.max(this.maxTokens, 8192) })
+          })
+        }, 3, signal);
+
+        if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+        data = await res.json();
+        assistantMsg = data.message;
+      } catch (err) {
+        if (err.name === 'AbortError') {
+          this._notify({ type: 'TASK_STOPPED', messages });
+          this._bgMsg('SAVE_TASK_HISTORY', {
+            task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
+            log, messages, success: false
+          }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
+          return { success: false, error: 'Durduruldu', log, messages };
+        }
+        throw err;
+      }
+
+      // Show thinking content to user only if thinking mode is enabled
+      if (assistantMsg.thinking && this.thinkingMode && this.thinkingMode !== 'off') {
+        this._notify({ type: 'AGENT_THOUGHT', content: `💭 ${assistantMsg.thinking.substring(0, 500)}${assistantMsg.thinking.length > 500 ? '...' : ''}` });
+      }
 
       messages.push(assistantMsg);
 
@@ -697,7 +540,7 @@ export class AgentCore {
           try {
             if (fileUpdateCount === 0) {
               // Agent never updated the file — generate HTML from research buffer
-              const html = await this._buildFinalHtml(taskDescription, result, researchBuffer);
+              const html = await this._buildFinalHtml(taskDescription, result, researchBuffer, signal);
               if (html) {
                 await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
                 fileUpdateCount++;
@@ -723,14 +566,27 @@ export class AgentCore {
             role: 'user',
             content: `Please provide your final answer now. Summarize all findings in detail.${fileHint}`
           });
-          const retryRes = await fetch(`${this.apiBase}/api/chat`, {
-            method: 'POST',
-            headers: this._headers(),
-            body: JSON.stringify({
-              model: this.model, messages, tools: AGENT_TOOLS, stream: false,
-              options: { temperature: 0.2, num_predict: this.maxTokens }
-            })
-          });
+          let retryRes;
+          try {
+            retryRes = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
+              method: 'POST',
+              headers: this._headers(),
+              body: JSON.stringify({
+                model: this.model, messages, tools: AGENT_TOOLS, stream: false,
+                options: this._buildOptions({ temperature: 0.2, num_predict: this.maxTokens })
+              })
+            }, 3, signal);
+          } catch (retryErr) {
+            if (retryErr.name === 'AbortError') {
+              this._notify({ type: 'TASK_STOPPED', messages });
+              this._bgMsg('SAVE_TASK_HISTORY', {
+                task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
+                log, messages, success: false
+              }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
+              return { success: false, error: 'Durduruldu', log, messages };
+            }
+            throw retryErr;
+          }
           if (retryRes.ok) {
             const retryData = await retryRes.json();
             const retryMsg = retryData.message;
@@ -745,7 +601,7 @@ export class AgentCore {
                 catch (e) { tResult = { error: e.message }; }
                 const tSan = this._sanitizeToolResult(tName, tResult);
                 this._notify({ type: 'TOOL_RESULT', tool: tName, result: tSan });
-                messages.push({ role: 'tool', content: JSON.stringify(tSan) });
+                messages.push({ role: 'tool', name: tName, content: JSON.stringify(tSan) });
                 if (tName === 'file_open') fileOpened = true;
               }
               result = retryMsg.content || '(dosya oluşturuldu)';
@@ -757,75 +613,233 @@ export class AgentCore {
 
         log.push({ type: 'final', content: result });
         this._notify({ type: 'TASK_COMPLETE', result, messages, success: true });
+
+        // ── Auto-save recipe if task involved DOM-heavy interaction on a site ──
+        const domSteps = log.filter(e => e.type === 'tool' && e.tool?.startsWith('dom_'));
+        const navSteps = log.filter(e => e.type === 'tool' && (e.tool === 'tab_navigate' || e.tool === 'tab_create'));
+        const toolResults = log.filter(e => e.type === 'tool_result');
+        if (domSteps.length >= 2) {
+          let site = '';
+          for (const ns of navSteps) {
+            const url = ns.args?.url || '';
+            try {
+              const host = new URL(url).hostname.replace(/^www\./, '');
+              if (host && !host.includes('localhost') && !host.includes('duckduckgo')) { site = host; break; }
+            } catch {}
+          }
+          if (site) {
+            // Only include steps that SUCCEEDED (no error in corresponding tool_result)
+            const readOnlyTools = new Set(['dom_get_summary', 'dom_query_all', 'dom_exists', 'dom_get_text', 'dom_get_value']);
+            const recipeSteps = [];
+            for (let i = 0; i < domSteps.length; i++) {
+              const step = domSteps[i];
+              if (readOnlyTools.has(step.tool)) continue;
+              // Check if this step had an error
+              const resultEntry = toolResults.find(r => r.tool === step.tool && r === toolResults[recipeSteps.length]);
+              const hadError = resultEntry?.error || (resultEntry?.result && typeof resultEntry.result === 'object' && resultEntry.result.error);
+              if (!hadError) {
+                recipeSteps.push({
+                  action: step.tool,
+                  selector: step.args?.selector || '',
+                  value: step.args?.value || (step.tool === 'dom_keypress' ? step.args?.key : ''),
+                  note: ''
+                });
+              }
+            }
+            // Take the LAST successful segment (most likely the actual working flow)
+            const finalSteps = recipeSteps.slice(-8);
+            if (finalSteps.length >= 2) {
+              this._bgMsg('MEMORY_SAVE_RECIPE', {
+                site,
+                task: taskDescription.substring(0, 100),
+                steps: finalSteps
+              }).catch((e) => { console.warn('[Agentia] Recipe auto-save failed:', e.message); });
+              this._notify({ type: 'AGENT_THOUGHT', content: `📓 Recipe saved for ${site}: ${finalSteps.length} steps` });
+            }
+          }
+        }
+
+        // ── Auto-generate report file if research was done but no file was created ──
+        if (!activeFileKey && researchBuffer.length >= 1) {
+          this._notify({ type: 'AGENT_THOUGHT', content: '📄 Araştırma raporu otomatik oluşturuluyor...' });
+          try {
+            const html = await this._buildFinalHtml(taskDescription, result, researchBuffer, signal);
+            if (html) {
+              const fileResult = await this._bgMsg('FILE_CREATE', { name: taskDescription.substring(0, 50), content: html, type: 'html' });
+              if (fileResult?.fileKey) {
+                activeFileKey = fileResult.fileKey;
+                await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
+                fileOpened = true;
+                this._notify({ type: 'AGENT_THOUGHT', content: '📄 Rapor oluşturuldu ve açıldı' });
+              }
+            }
+          } catch (e) {
+            this._notify({ type: 'AGENT_THOUGHT', content: `Rapor oluşturma hatası: ${e.message}` });
+          }
+        }
+
         this._bgMsg('SAVE_TASK_HISTORY', {
-          task: taskDescription, result, log, messages, success: true
-        }).catch(() => {});
+          task: taskDescription, result, log, messages, success: true,
+          reportFileKey: activeFileKey || null
+        }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
+        this._bgMsg('MEMORY_ADD_TASK', {
+          task: taskDescription,
+          summary: result.substring(0, 500),
+          success: true
+        }).catch((e) => { console.warn('[Agentia] Memory save failed:', e.message); });
         return { success: true, result, log, messages };
       }
 
       this._notify({ type: 'AGENT_THOUGHT', content: assistantMsg.content || '' });
 
-      // Execute each tool call
-      for (const tc of assistantMsg.tool_calls) {
+      // ── Determine which tool calls can run in parallel ────────────────────
+      // Read-only DOM tools and independent tab operations can be parallelized.
+      // State-mutating tools (click, type, navigate, file ops) must stay sequential.
+      const READ_ONLY_TOOLS = new Set([
+        'tab_get_active', 'tab_get_all', 'tab_screenshot',
+        'dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all',
+        'dom_get_summary', 'dom_extract', 'page_get_info', 'pdf_read',
+        'memory_recall', 'web_search'
+      ]);
+
+      const toolCalls = assistantMsg.tool_calls;
+      const parallelBatches = [];
+      let currentBatch = [];
+
+      for (const tc of toolCalls) {
         const toolName = tc.function?.name;
-        const toolArgs = tc.function?.arguments || {};
-
-        this._notify({ type: 'TOOL_CALL', tool: toolName, args: toolArgs });
-        log.push({ type: 'tool', tool: toolName, args: toolArgs });
-
-        let toolResult;
-        try {
-          toolResult = await this._executeTool(toolName, toolArgs, tabId);
-          const sanitized = this._sanitizeToolResult(toolName, toolResult);
-          log.push({ type: 'tool_result', tool: toolName, result: sanitized });
-          this._notify({ type: 'TOOL_RESULT', tool: toolName, result: sanitized });
-
-          // ── Capture research data for fallback HTML generation ─────────────
-          if (toolName === 'tab_navigate' || toolName === 'tab_create') {
-            currentPageUrl = toolResult?.url || '';
-          }
-          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'page_get_info'].includes(toolName) && toolResult) {
-            let snippet = '';
-            if (toolResult.text) snippet = toolResult.text;
-            else if (toolResult.content) snippet = toolResult.content;
-            else if (toolResult.elements) snippet = toolResult.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
-            else if (toolResult.url) snippet = `[${toolResult.title}](${toolResult.url})`;
-            if (snippet.length > 40) {
-              researchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
-            }
-          }
-
-          // ── Track file operations ──────────────────────────────────────────
-          if (toolName === 'file_create' && sanitized.fileKey) {
-            activeFileKey = sanitized.fileKey;
-            fileUpdateCount = 0;
-            fileOpened = false;
-          } else if (toolName === 'file_update') {
-            fileUpdateCount++;
-          } else if (toolName === 'file_open') {
-            fileOpened = true;
-          } else if (toolName === 'create_file' && sanitized.fileKey) {
-            // create_file opens automatically, treat as opened
-            activeFileKey = sanitized.fileKey;
-            fileOpened = true;
-          }
-
-          messages.push({ role: 'tool', content: JSON.stringify(sanitized) });
-        } catch (err) {
-          toolResult = { error: err.message };
-          log.push({ type: 'tool_error', tool: toolName, error: err.message });
-          this._notify({ type: 'TOOL_ERROR', tool: toolName, error: err.message });
-          messages.push({ role: 'tool', content: JSON.stringify({ error: err.message }) });
+        if (READ_ONLY_TOOLS.has(toolName) && currentBatch.every(t => READ_ONLY_TOOLS.has(t.function?.name))) {
+          currentBatch.push(tc);
+        } else {
+          if (currentBatch.length > 0) parallelBatches.push(currentBatch);
+          currentBatch = [tc]; // Sequential tool starts a new batch
         }
+      }
+      if (currentBatch.length > 0) parallelBatches.push(currentBatch);
 
-        // Check abort signal after each tool execution too
+      // Execute batches: tools within a batch run in parallel, batches run sequentially
+      for (const batch of parallelBatches) {
+        // Check abort signal before each batch
         if (signal?.aborted) {
           this._notify({ type: 'TASK_STOPPED', messages });
           this._bgMsg('SAVE_TASK_HISTORY', {
             task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
             log, messages, success: false
-          }).catch(() => {});
+          }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
           return { success: false, error: 'Durduruldu', log, messages };
+        }
+
+        const isParallel = batch.length > 1 && batch.every(tc => READ_ONLY_TOOLS.has(tc.function?.name));
+
+        const execTool = async (tc) => {
+          const toolName = tc.function?.name;
+          const toolArgs = tc.function?.arguments || {};
+          this._notify({ type: 'TOOL_CALL', tool: toolName, args: toolArgs });
+          log.push({ type: 'tool', tool: toolName, args: toolArgs });
+
+          let toolResult;
+          try {
+            toolResult = await this._executeTool(toolName, toolArgs, tabId);
+            const sanitized = this._sanitizeToolResult(toolName, toolResult);
+            log.push({ type: 'tool_result', tool: toolName, result: sanitized });
+            this._notify({ type: 'TOOL_RESULT', tool: toolName, result: sanitized });
+
+            // ── Capture research data for fallback HTML generation ─────────────
+            if (toolName === 'tab_navigate' || toolName === 'tab_create') {
+              currentPageUrl = toolResult?.url || '';
+            }
+            if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && toolResult) {
+              let snippet = '';
+              if (toolResult.text) snippet = toolResult.text;
+              else if (toolResult.content) snippet = toolResult.content;
+              else if (toolResult.results) snippet = toolResult.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
+              else if (toolResult.elements) snippet = toolResult.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
+              else if (toolResult.pages) snippet = toolResult.pages.map(p => `[Page ${p.page}] ${p.text}`).join('\n');
+              else if (toolResult.url) snippet = `[${toolResult.title}](${toolResult.url})`;
+              // dom_get_summary: extract text from buttons, links, and other structured data
+              else if (toolResult.buttons || toolResult.links || toolResult.other) {
+                const parts = [];
+                if (toolResult.title) parts.push(`Title: ${toolResult.title}`);
+                if (toolResult.loggedIn !== undefined) parts.push(`Logged in: ${toolResult.loggedIn}`);
+                if (toolResult.buttons?.length) parts.push(`Buttons: ${toolResult.buttons.map(b => b.text || b.selector || b.ariaLabel).filter(Boolean).join(', ')}`);
+                if (toolResult.links?.length) parts.push(`Links: ${toolResult.links.slice(0, 20).map(l => `${l.text || l.selector}→${l.href || ''}`).join(', ')}`);
+                if (toolResult.inputs?.length) parts.push(`Inputs: ${toolResult.inputs.map(i => i.label || i.selector || i.type).filter(Boolean).join(', ')}`);
+                if (toolResult.other?.length) parts.push(`Elements: ${toolResult.other.slice(0, 10).map(o => o.text || o.selector).filter(Boolean).join(', ')}`);
+                snippet = parts.join('\n');
+              }
+              if (snippet.length > 40) {
+                researchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
+              }
+            }
+
+            // ── Track file operations ──────────────────────────────────────────
+            if (toolName === 'file_create' && sanitized.fileKey) {
+              activeFileKey = sanitized.fileKey;
+              fileUpdateCount = 0;
+              fileOpened = false;
+            } else if (toolName === 'file_update') {
+              fileUpdateCount++;
+            } else if (toolName === 'file_open') {
+              fileOpened = true;
+            } else if (toolName === 'create_file' && sanitized.fileKey) {
+              // create_file opens automatically, treat as opened
+              activeFileKey = sanitized.fileKey;
+              fileOpened = true;
+            }
+
+            // ── Track screenshot for vision models ──────────────────────────────
+            if (toolName === 'tab_screenshot' && this._isVisionModel() && toolResult?.dataUrl) {
+              pendingScreenshot = await this._compressScreenshot(toolResult.dataUrl);
+            }
+
+            messages.push({ role: 'tool', name: toolName, content: JSON.stringify(sanitized) });
+
+            // ── Stuck detection: track consecutive DOM failures ────────────────
+            const isDomAction = ['dom_click', 'dom_type', 'dom_clear', 'dom_scroll', 'dom_hover', 'dom_select', 'dom_keypress'].includes(toolName);
+            const isDomQuery = ['dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all'].includes(toolName);
+            if ((isDomAction || isDomQuery) && sanitized?.error) {
+              consecutiveDomFailures++;
+            } else if (isDomAction || isDomQuery) {
+              consecutiveDomFailures = 0;
+            }
+          } catch (err) {
+            toolResult = { error: err.message };
+            log.push({ type: 'tool_error', tool: toolName, error: err.message });
+            this._notify({ type: 'TOOL_ERROR', tool: toolName, error: err.message });
+            messages.push({ role: 'tool', name: toolName, content: JSON.stringify({ error: err.message }) });
+
+            // Stuck detection for thrown errors too
+            const isDomTool = toolName.startsWith('dom_');
+            if (isDomTool) consecutiveDomFailures++;
+          }
+        };
+
+        if (isParallel) {
+          await Promise.all(batch.map(tc => execTool(tc)));
+        } else {
+          for (const tc of batch) {
+            await execTool(tc);
+          }
+        }
+
+        // Check abort signal after each batch
+        if (signal?.aborted) {
+          this._notify({ type: 'TASK_STOPPED', messages });
+          this._bgMsg('SAVE_TASK_HISTORY', {
+            task: taskDescription, result: 'Görev kullanıcı tarafından durduruldu.',
+            log, messages, success: false
+          }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
+          return { success: false, error: 'Durduruldu', log, messages };
+        }
+
+        // ── Stuck detection: inject guidance after repeated DOM failures ────────
+        if (consecutiveDomFailures >= 3) {
+          consecutiveDomFailures = 0;  // Reset to avoid repeating
+          this._notify({ type: 'AGENT_THOUGHT', content: '⚠ Stuck detected — injecting guidance...' });
+          messages.push({
+            role: 'user',
+            content: `[STUCK RECOVERY] You've failed to find the right DOM element 3+ times. Stop guessing selectors and try this approach:\n1. Call dom_get_summary to see ALL interactive elements on the page grouped by type (buttons, links, inputs)\n2. Use the exact selector from the result (prefer data-testid, aria-label, or id selectors)\n3. If still stuck, try keyboard shortcuts (e.g., 'n' for new post on social media) or try dom_keypress with key="Enter"\n4. NEVER try more than 2 different selectors for the same action before calling dom_get_summary`
+          });
         }
       }
     }
@@ -835,7 +849,7 @@ export class AgentCore {
       this._notify({ type: 'AGENT_THOUGHT', content: '⚠ Max iterasyon — dosya içeriği oluşturuluyor...' });
       try {
         if (fileUpdateCount === 0) {
-          const html = await this._buildFinalHtml(taskDescription, '', researchBuffer);
+          const html = await this._buildFinalHtml(taskDescription, '', researchBuffer, signal);
           if (html) await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
         }
         await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
@@ -848,13 +862,18 @@ export class AgentCore {
       task: taskDescription,
       result: 'Max iterasyon limitine ulaşıldı',
       log, messages, success: false
-    }).catch(() => {});
+    }).catch((e) => { console.warn('[Agentia] Task history save failed:', e.message); });
+    this._bgMsg('MEMORY_ADD_TASK', {
+      task: taskDescription,
+      summary: 'Max iterasyon — kısmi sonuç kaydedildi',
+      success: false
+    }).catch((e) => { console.warn('[Agentia] Memory save failed:', e.message); });
     return { success: false, error: 'Max iterations reached', log, messages };
   }
 
   // ---- Final HTML Builder (fallback when agent forgot to call file_update) ----
   // Uses research buffer + one extra LLM call to generate HTML from raw findings
-  async _buildFinalHtml(taskDescription, agentTextResult, researchBuffer) {
+  async _buildFinalHtml(taskDescription, agentTextResult, researchBuffer, signal = null) {
     // Combine research buffer into a readable summary
     const bufferText = researchBuffer
       .map((item, i) => `--- Kaynak ${i + 1}${item.url ? ' (' + item.url + ')' : ''} ---\n${item.text}`)
@@ -863,10 +882,14 @@ export class AgentCore {
     // If we have nothing, use the agent's text result
     const context = bufferText || agentTextResult || '(Araştırma verisi bulunamadı)';
 
-    this._notify({ type: 'AGENT_THOUGHT', content: `📄 ${researchBuffer.length} kaynaktan HTML oluşturuluyor...` });
+    // Dynamic context limit: use more of the research data for larger buffers
+    // but cap at 48000 to avoid exceeding model context window
+    const maxContext = Math.min(context.length, 48000);
+
+    this._notify({ type: 'AGENT_THOUGHT', content: `📄 ${researchBuffer.length} kaynaktan HTML oluşturuluyor (${Math.round(maxContext / 1024)}KB veri)...` });
 
     try {
-      const res = await fetch(`${this.apiBase}/api/chat`, {
+      const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
         method: 'POST',
         headers: this._headers(),
         body: JSON.stringify({
@@ -878,13 +901,13 @@ export class AgentCore {
             },
             {
               role: 'user',
-              content: `Task: "${taskDescription}"\n\nResearch data collected:\n\n${context.slice(0, 12000)}\n\nCreate a complete, visually rich HTML page presenting all the findings above.\n\nRequirements:\n- Inline CSS only (no external files)\n- Gradient header with page title\n- Card grid layout for items (3 columns, responsive)\n- Each card: title, description, source URL as link\n- Modern design: rounded corners, shadows, hover effects\n- Turkish or same language as task\n- Start with <!DOCTYPE html> and include everything in one file\n\nOutput ONLY the HTML code:`
+              content: `Task: "${taskDescription}"\n\nResearch data collected:\n\n${context.slice(0, maxContext)}\n\nCreate a complete, visually rich HTML page presenting all the findings above.\n\nRequirements:\n- Inline CSS only (no external files)\n- Gradient header with page title\n- Card grid layout for items (3 columns, responsive)\n- Each card: title, description, source URL as link\n- Modern design: rounded corners, shadows, hover effects\n- Turkish or same language as task\n- Start with <!DOCTYPE html> and include everything in one file\n\nOutput ONLY the HTML code:`
             }
           ],
           stream: false,
-          options: { temperature: 0.3, num_predict: 8192 }
+          options: this._buildOptions({ temperature: 0.3, num_predict: 16384 })
         })
-      });
+      }, 3, signal);
 
       if (!res.ok) return null;
       const data = await res.json();
@@ -937,7 +960,7 @@ export class AgentCore {
         return this._bgMsg('TAB_ACTION', { action: 'go_forward', tabId });
 
       case 'dom_click':
-        return this._bgMsg('DOM_ACTION', { action: 'click', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'click', selector: args.selector, x: args.x, y: args.y, tabId });
       case 'dom_type':
         return this._bgMsg('DOM_ACTION', { action: 'type', selector: args.selector, value: args.value, tabId });
       case 'dom_clear':
@@ -965,6 +988,9 @@ export class AgentCore {
 
       case 'page_get_info':
         return this._bgMsg('GET_PAGE_INFO', { tabId });
+
+      case 'pdf_read':
+        return this._bgMsg('PDF_READ', { url: args.url, pages: args.pages, tabId });
 
       case 'recording_start':
         return this._bgMsg('RECORDING_START', { name: args.name, tabId: args.tabId || tabId });
@@ -1002,8 +1028,23 @@ export class AgentCore {
       case 'file_open':
         return this._bgMsg('FILE_OPEN', { fileKey: args.fileKey });
 
+      case 'memory_save':
+        return this._bgMsg('MEMORY_ADD_LEARNED', { topic: args.topic, info: args.info });
+
+      case 'memory_recall':
+        return this._bgMsg('MEMORY_GET', { query: args.query });
+
+      case 'memory_save_recipe':
+        return this._bgMsg('MEMORY_SAVE_RECIPE', { site: args.site, task: args.task, steps: args.steps });
+
+      case 'image_save':
+        return this._bgMsg('IMAGE_SAVE', { url: args.url });
+
+      case 'web_search':
+        return this._bgMsg('WEB_SEARCH', { query: args.query, maxResults: args.maxResults });
+
       default:
-        throw new Error(`Unknown tool: ${tool}`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, image_save, web_search.`);
     }
   }
 
@@ -1044,14 +1085,54 @@ export class AgentCore {
       return { fileKey: result.fileKey, opened: true };
     }
 
-    // Screenshot: strip base64, just confirm it was taken
+    // Screenshot: confirm capture. Image data is sent via pendingScreenshot in runTask loop.
     if (tool === 'tab_screenshot') {
-      return { screenshot: 'taken', note: 'Screenshot captured but not sent to context (too large)' };
+      if (this._isVisionModel()) {
+        return { screenshot: 'attached', note: 'Screenshot image attached to next LLM call. Use it to identify elements on the page.' };
+      }
+      return { screenshot: 'taken', note: 'Screenshot captured but model does not support vision. Use dom_get_summary instead.' };
     }
 
     // page_get_info: strip full HTML, keep url+title only
     if (tool === 'page_get_info') {
-      return { url: result.url, title: result.title };
+      return { url: result.url, title: result.title, isPdf: result.isPdf || false, hint: result.hint };
+    }
+
+    // pdf_read: limit total text to ~8000 chars for context window
+    if (tool === 'pdf_read' && result.pages) {
+      let totalChars = 0;
+      const limitedPages = [];
+      for (const p of result.pages) {
+        if (totalChars + p.text.length > 8000) {
+          limitedPages.push({ page: p.page, text: p.text.substring(0, 8000 - totalChars) + '...' });
+          break;
+        }
+        limitedPages.push(p);
+        totalChars += p.text.length;
+      }
+      return {
+        title: result.title,
+        totalPages: result.totalPages,
+        pagesRead: limitedPages.length,
+        pages: limitedPages,
+        charCount: result.charCount,
+        truncated: limitedPages.length < result.pages.length
+      };
+    }
+
+    // memory_save: just confirm
+    if (tool === 'memory_save') {
+      return { saved: true, topic: result?.topic || args?.topic };
+    }
+
+    // memory_recall: return as-is (already limited by buildMemoryPrompt)
+    if (tool === 'memory_recall') {
+      return result || { memories: [], note: 'No relevant memories found' };
+    }
+
+    // memory_save_recipe: just confirm
+    if (tool === 'memory_save_recipe') {
+      return { saved: true, site: result?.site, task: result?.task };
     }
 
     // dom_query_all: limit elements and truncate text
@@ -1068,20 +1149,30 @@ export class AgentCore {
       };
     }
 
-    // dom_get_summary: limit to 20 elements and trim text
-    if (tool === 'dom_get_summary' && result.interactive) {
-      return {
+    // dom_get_summary: grouped format (buttons, links, inputs, other)
+    if (tool === 'dom_get_summary') {
+      const trim = (arr, max) => (arr || []).slice(0, max).map(el => {
+        const out = { selector: el.selector };
+        if (el.text) out.text = el.text.substring(0, 80);
+        if (el.iconButton) out.iconButton = true;
+        if (el.position) out.position = el.position;
+        if (el['aria-label']) out['aria-label'] = el['aria-label'];
+        if (el.href) out.href = el.href.substring(0, 150);
+        if (el.type) out.type = el.type;
+        if (el.placeholder) out.placeholder = el.placeholder;
+        return out;
+      });
+      const out = {
         url: result.url,
         title: result.title,
-        interactive: result.interactive.slice(0, 20).map(el => ({
-          tag: el.tag,
-          id: el.id,
-          name: el.name,
-          type: el.type,
-          text: (el.text || '').substring(0, 50),
-          selector: el.selector
-        }))
+        loggedIn: result.loggedIn,
+        buttons: trim(result.buttons, 12),
+        links: trim(result.links, 15),
+        inputs: trim(result.inputs, 10),
+        other: trim(result.other, 5)
       };
+      if (result.loginHint) out.loginHint = result.loginHint;
+      return out;
     }
 
     // Generic: if JSON is very large, truncate
@@ -1105,16 +1196,16 @@ export class AgentCore {
   }
 
   _notify(data) {
-    chrome.runtime.sendMessage({ type: 'AGENT_EVENT', data }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'AGENT_EVENT', data }).catch((e) => { console.warn('[Agentia] Event notification failed:', e.message); });
   }
 
   _withSystem(messages) {
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-US');
-    const systemPrompt = AGENT_SYSTEM_PROMPT_BASE.replace('[DATE_TIME_INJECTED_HERE]', `Today's date: ${dateStr}\nCurrent time: ${timeStr}`);
-
-    const fullSystem = systemPrompt + (this.systemPrompt ? '\n\n' + this.systemPrompt : '');
+    const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
+    const fullSystem = buildSystemPrompt(
+      AGENT_SYSTEM_PROMPT_BASE,
+      this.systemPrompt,
+      this._buildMemoryPrompt(lastUserMsg)
+    );
     return [{ role: 'system', content: fullSystem }, ...messages];
   }
 
