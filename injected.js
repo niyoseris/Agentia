@@ -1,12 +1,82 @@
 // Agentia Injected Script — web-accessible resource
-// Handles advanced DOM operations that need full page context
+// Loaded into every page via content script for advanced DOM operations
+// that need full page context (dialog interception, file input, drag-drop)
 
 (function () {
   'use strict';
 
-  window.__agentia = window.__agentia || {};
+  if (window.__agentia && window.__agentia._injected) return; // Already loaded
+  if (!window.__agentia) window.__agentia = {};
 
-  // Drag-and-drop simulation
+  window.__agentia._injected = true;
+
+  // ── Alert / Confirm / Prompt Interception ────────────────────────
+  window.__agentia._alertBuffer = [];
+  window.__agentia._origAlert = null;
+  window.__agentia._origConfirm = null;
+  window.__agentia._origPrompt = null;
+
+  window.__agentia.interceptAlerts = function (options = {}) {
+    if (!window.__agentia._origAlert) {
+      window.__agentia._origAlert = window.alert;
+      window.__agentia._origConfirm = window.confirm;
+      window.__agentia._origPrompt = window.prompt;
+    }
+
+    if (options.intercept !== false) {
+      const autoConfirm = options.autoConfirm !== false;
+      const autoPrompt = options.autoPrompt || '';
+
+      window.alert = function (msg) {
+        window.__agentia._alertBuffer.push({
+          type: 'alert', message: String(msg || ''), time: Date.now()
+        });
+      };
+
+      window.confirm = function (msg) {
+        window.__agentia._alertBuffer.push({
+          type: 'confirm', message: String(msg || ''), autoResponse: autoConfirm, time: Date.now()
+        });
+        return autoConfirm;
+      };
+
+      window.prompt = function (msg, defaultText) {
+        window.__agentia._alertBuffer.push({
+          type: 'prompt', message: String(msg || ''), defaultText: defaultText || '', autoResponse: autoPrompt, time: Date.now()
+        });
+        return autoPrompt;
+      };
+    } else {
+      // Restore originals
+      if (window.__agentia._origAlert) window.alert = window.__agentia._origAlert;
+      if (window.__agentia._origConfirm) window.confirm = window.__agentia._origConfirm;
+      if (window.__agentia._origPrompt) window.prompt = window.__agentia._origPrompt;
+    }
+  };
+
+  window.__agentia.getAlertBuffer = function (clear = true) {
+    const alerts = [...window.__agentia._alertBuffer];
+    if (clear) window.__agentia._alertBuffer = [];
+    return alerts;
+  };
+
+  // ── beforeunload suppression ─────────────────────────────────────
+  // Prevent "Are you sure you want to leave?" dialogs from blocking navigation
+  window.__agentia._beforeUnloadBlocked = false;
+
+  window.__agentia.suppressBeforeUnload = function (suppress = true) {
+    if (suppress && !window.__agentia._beforeUnloadBlocked) {
+      window.__agentia._beforeUnloadBlocked = true;
+      window.addEventListener('beforeunload', function (e) {
+        // Don't prevent — just don't set returnValue which suppresses the dialog
+        // The page's own handler may have set it; we clear it
+        e.returnValue = undefined;
+        delete e.returnValue;
+      }, true);
+    }
+  };
+
+  // ── Drag-and-drop simulation ─────────────────────────────────────
   window.__agentia.dragDrop = function (sourceSelector, targetSelector) {
     const source = document.querySelector(sourceSelector);
     const target = document.querySelector(targetSelector);
@@ -38,20 +108,32 @@
     return { success: true };
   };
 
-  // File input simulation
-  window.__agentia.setFileInput = function (selector, fileName, fileContent, mimeType) {
+  // ── File input simulation ────────────────────────────────────────
+  window.__agentia.setFileInput = function (selector, fileName, fileContent, mimeType, isBase64) {
     const input = document.querySelector(selector);
-    if (!input || input.type !== 'file') return { error: 'File input not found' };
+    if (!input || input.type !== 'file') return { error: 'File input not found: ' + selector };
 
-    const file = new File([fileContent], fileName, { type: mimeType || 'text/plain' });
+    // If content is base64 encoded (from background fetch), decode it
+    if (isBase64) {
+      try {
+        const binary = atob(fileContent);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        fileContent = bytes.buffer;
+      } catch {
+        // If decode fails, use as-is (might be plain text)
+      }
+    }
+
+    const file = new File([fileContent], fileName, { type: mimeType || 'application/octet-stream' });
     const dt = new DataTransfer();
     dt.items.add(file);
     input.files = dt.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));
-    return { success: true };
+    return { success: true, fileName, mimeType };
   };
 
-  // Shadow DOM piercing query
+  // ── Shadow DOM piercing query ────────────────────────────────────
   window.__agentia.shadowQuery = function (selectors) {
     function pierceQuery(root, sel) {
       const direct = root.querySelector(sel);
@@ -78,17 +160,15 @@
     };
   };
 
-  // Scroll to specific coordinates smoothly
+  // ── Scroll helpers ───────────────────────────────────────────────
   window.__agentia.smoothScrollTo = function (x, y) {
     window.scrollTo({ top: y, left: x, behavior: 'smooth' });
     return { scrolled: true };
   };
 
-  // Get full page text content (for extraction)
   window.__agentia.getPageText = function () {
     return document.body.innerText;
   };
 
-  // Execute arbitrary code (used by agent for custom scripts)
   window.__agentia.ready = true;
 })();

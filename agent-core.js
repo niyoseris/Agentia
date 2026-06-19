@@ -17,6 +17,27 @@ export class AgentCore {
     this.visionEnabled = 'auto'; // 'auto', 'on', 'off'
     this.memoryStore = null; // Set by background.js after init
     this._visionCache = null; // Cache for model vision capability check
+
+    // Runtime task state exposed for quick-report and UI introspection
+    this.currentTaskDescription = '';
+    this.currentResearchBuffer = [];
+
+    // Tab isolation: track tabs opened by Agentia and the current working tab
+    this.agentTabIds = new Set();
+    this.focusedTabId = null;
+  }
+
+  // Generate an HTML report from the research collected so far
+  async buildQuickReportHtml() {
+    if (!this.currentResearchBuffer || this.currentResearchBuffer.length === 0) {
+      throw new Error('Henüz araştırma verisi yok.');
+    }
+    return this._buildFinalHtml(
+      this.currentTaskDescription,
+      '',
+      this.currentResearchBuffer,
+      null // independent abort signal so it does not disturb the running task
+    );
   }
 
   // Build memory context string for system prompt injection
@@ -335,6 +356,16 @@ export class AgentCore {
   // existingMessages: pass prior conversation to continue from where it left off
   // signal: AbortController signal — abort() stops the loop between iterations
   async runTask(taskDescription, tabId, existingMessages = null, signal = null) {
+    // Expose current task state for quick-report / UI introspection
+    this.currentTaskDescription = taskDescription || '';
+    this.currentResearchBuffer = [];
+
+    // Tab isolation: reset for every task, start from the tab the user invoked the task on
+    this.agentTabIds = new Set();
+    this.focusedTabId = tabId || null;
+
+    console.log(`[Agentia] Starting task with model=${this.model} base=${this.apiBase} cloud=${this.useCloud}`);
+
     let messages;
 
     // Inject current date/time into system prompt
@@ -367,11 +398,11 @@ export class AgentCore {
 
     // Research buffer — raw text snippets collected during browsing
     // Used to build the final HTML if the model never called file_update
-    const researchBuffer = [];
+    this.currentResearchBuffer = [];
 
     // ── Restore file tracking and research buffer from prior session ──────
     // When continuing a task, scan existingMessages to recover state that
-    // would otherwise be lost (activeFileKey, researchBuffer entries, etc.)
+    // would otherwise be lost (activeFileKey, this.currentResearchBuffer entries, etc.)
     if (existingMessages && existingMessages.length > 0) {
       let restoredUrl = '';
       // Build a map of tool call names from assistant messages to match
@@ -405,7 +436,7 @@ export class AgentCore {
           if ((toolName === 'tab_navigate' || toolName === 'tab_create') && parsed) {
             if (parsed?.url) restoredUrl = parsed.url;
           }
-          // Rebuild researchBuffer from tool results in message history
+          // Rebuild this.currentResearchBuffer from tool results in message history
           if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && parsed) {
             let snippet = '';
             if (parsed.text) snippet = parsed.text;
@@ -415,7 +446,7 @@ export class AgentCore {
             else if (parsed.pages) snippet = parsed.pages.map(p => `[Page ${p.page}] ${p.text}`).join('\n');
             else if (parsed.url) snippet = `[${parsed.title}](${parsed.url})`;
             if (snippet.length > 40) {
-              researchBuffer.push({ url: restoredUrl, text: snippet.slice(0, 3000) });
+              this.currentResearchBuffer.push({ url: restoredUrl, text: snippet.slice(0, 3000) });
             }
           }
           // Recover file tracking state
@@ -455,14 +486,14 @@ export class AgentCore {
         return { success: false, error: 'Durduruldu', log, messages };
       }
 
-      // ── Auto-checkpoint: force file_update from researchBuffer ────────────
+      // ── Auto-checkpoint: force file_update from this.currentResearchBuffer ────────────
       // Every 6 iterations: if file was created but NEVER updated, auto-write
-      // partial content from researchBuffer WITHOUT asking the LLM.
+      // partial content from this.currentResearchBuffer WITHOUT asking the LLM.
       // (Reminders don't work — LLM says "OK" but never calls file_update)
-      if (activeFileKey && !fileOpened && iterations > 0 && iterations % 6 === 0 && fileUpdateCount === 0 && researchBuffer.length >= 1) {
-        this._notify({ type: 'AGENT_THOUGHT', content: `📄 Auto-checkpoint: ${researchBuffer.length} kaynak bulundu, dosyaya yazılıyor...` });
+      if (activeFileKey && !fileOpened && iterations > 0 && iterations % 6 === 0 && fileUpdateCount === 0 && this.currentResearchBuffer.length >= 1) {
+        this._notify({ type: 'AGENT_THOUGHT', content: `📄 Auto-checkpoint: ${this.currentResearchBuffer.length} kaynak bulundu, dosyaya yazılıyor...` });
         try {
-          const partialHtml = await this._buildFinalHtml(taskDescription, '', researchBuffer, signal);
+          const partialHtml = await this._buildFinalHtml(taskDescription, '', this.currentResearchBuffer, signal);
           if (partialHtml) {
             await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: partialHtml });
             fileUpdateCount++;
@@ -540,7 +571,7 @@ export class AgentCore {
           try {
             if (fileUpdateCount === 0) {
               // Agent never updated the file — generate HTML from research buffer
-              const html = await this._buildFinalHtml(taskDescription, result, researchBuffer, signal);
+              const html = await this._buildFinalHtml(taskDescription, result, this.currentResearchBuffer, signal);
               if (html) {
                 await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
                 fileUpdateCount++;
@@ -660,10 +691,10 @@ export class AgentCore {
         }
 
         // ── Auto-generate report file if research was done but no file was created ──
-        if (!activeFileKey && researchBuffer.length >= 1) {
+        if (!activeFileKey && this.currentResearchBuffer.length >= 1) {
           this._notify({ type: 'AGENT_THOUGHT', content: '📄 Araştırma raporu otomatik oluşturuluyor...' });
           try {
-            const html = await this._buildFinalHtml(taskDescription, result, researchBuffer, signal);
+            const html = await this._buildFinalHtml(taskDescription, result, this.currentResearchBuffer, signal);
             if (html) {
               const fileResult = await this._bgMsg('FILE_CREATE', { name: taskDescription.substring(0, 50), content: html, type: 'html' });
               if (fileResult?.fileKey) {
@@ -699,7 +730,8 @@ export class AgentCore {
         'tab_get_active', 'tab_get_all', 'tab_screenshot',
         'dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all',
         'dom_get_summary', 'dom_extract', 'page_get_info', 'pdf_read',
-        'memory_recall', 'web_search'
+        'memory_recall', 'web_search',
+        'dialog_detect', 'dialog_get_intercepted'
       ]);
 
       const toolCalls = assistantMsg.tool_calls;
@@ -768,7 +800,7 @@ export class AgentCore {
                 snippet = parts.join('\n');
               }
               if (snippet.length > 40) {
-                researchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
+                this.currentResearchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
               }
             }
 
@@ -849,7 +881,7 @@ export class AgentCore {
       this._notify({ type: 'AGENT_THOUGHT', content: '⚠ Max iterasyon — dosya içeriği oluşturuluyor...' });
       try {
         if (fileUpdateCount === 0) {
-          const html = await this._buildFinalHtml(taskDescription, '', researchBuffer, signal);
+          const html = await this._buildFinalHtml(taskDescription, '', this.currentResearchBuffer, signal);
           if (html) await this._bgMsg('FILE_UPDATE', { fileKey: activeFileKey, content: html });
         }
         await this._bgMsg('FILE_OPEN', { fileKey: activeFileKey });
@@ -935,70 +967,92 @@ export class AgentCore {
 
   // ---- Tool Execution ----
   async _executeTool(tool, args, defaultTabId) {
-    const tabId = args.tabId || defaultTabId;
+    // Tab isolation: all tools default to the agent's focused tab, not the user's active tab
+    const effectiveTabId = args.tabId || this.focusedTabId || defaultTabId;
 
     switch (tool) {
-      case 'tab_create':
-        return this._bgMsg('TAB_ACTION', { action: 'create', url: args.url, active: args.active });
-      case 'tab_close':
-        return this._bgMsg('TAB_ACTION', { action: 'close', tabId: args.tabId });
-      case 'tab_navigate':
-        return this._bgMsg('TAB_ACTION', { action: 'navigate', tabId, url: args.url });
-      case 'tab_activate':
-        return this._bgMsg('TAB_ACTION', { action: 'activate', tabId: args.tabId });
+      case 'tab_create': {
+        const newTab = await this._bgMsg('TAB_ACTION', { action: 'create', url: args.url, active: args.active });
+        if (newTab?.id) {
+          this.agentTabIds.add(newTab.id);
+          this.focusedTabId = newTab.id;
+        }
+        return newTab;
+      }
+      case 'tab_close': {
+        const closeTabId = args.tabId || this.focusedTabId;
+        if (closeTabId) this.agentTabIds.delete(closeTabId);
+        if (this.focusedTabId === closeTabId) {
+          // Fallback to any remaining agent tab, or keep null
+          this.focusedTabId = this.agentTabIds.size > 0 ? Array.from(this.agentTabIds)[this.agentTabIds.size - 1] : null;
+        }
+        return this._bgMsg('TAB_ACTION', { action: 'close', tabId: closeTabId });
+      }
+      case 'tab_navigate': {
+        const navTabId = args.tabId || this.focusedTabId;
+        if (navTabId) this.focusedTabId = navTabId;
+        return this._bgMsg('TAB_ACTION', { action: 'navigate', tabId: navTabId, url: args.url });
+      }
+      case 'tab_activate': {
+        const actTabId = args.tabId || this.focusedTabId;
+        if (actTabId) this.focusedTabId = actTabId;
+        return this._bgMsg('TAB_ACTION', { action: 'activate', tabId: actTabId });
+      }
       case 'tab_get_all':
         return this._bgMsg('TAB_ACTION', { action: 'get_all' });
       case 'tab_get_active':
-        return this._bgMsg('TAB_ACTION', { action: 'get_active' });
+        // Return the agent's focused tab, not the user's active tab
+        return this._bgMsg('TAB_ACTION', { action: 'get_tab', tabId: this.focusedTabId });
       case 'tab_screenshot':
-        return this._bgMsg('TAB_ACTION', { action: 'screenshot' });
+        // Capture the agent's focused tab, not the user's visible tab
+        return this._bgMsg('TAB_ACTION', { action: 'screenshot', tabId: this.focusedTabId });
       case 'tab_reload':
-        return this._bgMsg('TAB_ACTION', { action: 'reload', tabId });
+        return this._bgMsg('TAB_ACTION', { action: 'reload', tabId: effectiveTabId });
       case 'tab_back':
-        return this._bgMsg('TAB_ACTION', { action: 'go_back', tabId });
+        return this._bgMsg('TAB_ACTION', { action: 'go_back', tabId: effectiveTabId });
       case 'tab_forward':
-        return this._bgMsg('TAB_ACTION', { action: 'go_forward', tabId });
+        return this._bgMsg('TAB_ACTION', { action: 'go_forward', tabId: effectiveTabId });
 
       case 'dom_click':
-        return this._bgMsg('DOM_ACTION', { action: 'click', selector: args.selector, x: args.x, y: args.y, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'click', selector: args.selector, x: args.x, y: args.y, tabId: effectiveTabId });
       case 'dom_type':
-        return this._bgMsg('DOM_ACTION', { action: 'type', selector: args.selector, value: args.value, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'type', selector: args.selector, value: args.value, tabId: effectiveTabId });
       case 'dom_clear':
-        return this._bgMsg('DOM_ACTION', { action: 'clear', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'clear', selector: args.selector, tabId: effectiveTabId });
       case 'dom_scroll':
-        return this._bgMsg('DOM_ACTION', { action: 'scroll', selector: args.selector, y: args.y, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'scroll', selector: args.selector, y: args.y, tabId: effectiveTabId });
       case 'dom_hover':
-        return this._bgMsg('DOM_ACTION', { action: 'hover', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'hover', selector: args.selector, tabId: effectiveTabId });
       case 'dom_select':
-        return this._bgMsg('DOM_ACTION', { action: 'select', selector: args.selector, value: args.value, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'select', selector: args.selector, value: args.value, tabId: effectiveTabId });
       case 'dom_keypress':
-        return this._bgMsg('DOM_ACTION', { action: 'keypress', selector: args.selector, key: args.key, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'keypress', selector: args.selector, key: args.key, tabId: effectiveTabId });
       case 'dom_get_text':
-        return this._bgMsg('DOM_ACTION', { action: 'get_text', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'get_text', selector: args.selector, tabId: effectiveTabId });
       case 'dom_get_value':
-        return this._bgMsg('DOM_ACTION', { action: 'get_value', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'get_value', selector: args.selector, tabId: effectiveTabId });
       case 'dom_exists':
-        return this._bgMsg('DOM_ACTION', { action: 'exists', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'exists', selector: args.selector, tabId: effectiveTabId });
       case 'dom_query_all':
-        return this._bgMsg('DOM_ACTION', { action: 'query_all', selector: args.selector, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'query_all', selector: args.selector, tabId: effectiveTabId });
       case 'dom_get_summary':
-        return this._bgMsg('DOM_ACTION', { action: 'get_dom_summary', tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'get_dom_summary', tabId: effectiveTabId });
       case 'dom_extract':
-        return this._bgMsg('DOM_ACTION', { action: 'extract_data', fields: args.fields, tabId });
+        return this._bgMsg('DOM_ACTION', { action: 'extract_data', fields: args.fields, tabId: effectiveTabId });
 
       case 'page_get_info':
-        return this._bgMsg('GET_PAGE_INFO', { tabId });
+        return this._bgMsg('GET_PAGE_INFO', { tabId: effectiveTabId });
 
       case 'pdf_read':
-        return this._bgMsg('PDF_READ', { url: args.url, pages: args.pages, tabId });
+        return this._bgMsg('PDF_READ', { url: args.url, pages: args.pages, tabId: effectiveTabId });
 
       case 'recording_start':
-        return this._bgMsg('RECORDING_START', { name: args.name, tabId: args.tabId || tabId });
+        return this._bgMsg('RECORDING_START', { name: args.name, tabId: args.tabId || effectiveTabId });
       case 'recording_stop':
-        return this._bgMsg('RECORDING_STOP', { tabId: args.tabId || tabId });
+        return this._bgMsg('RECORDING_STOP', { tabId: args.tabId || effectiveTabId });
       case 'replay':
         return this._bgMsg('REPLAY_RECORDING', {
-          recordingId: args.recordingId, tabId: args.tabId || tabId, adaptive: args.adaptive
+          recordingId: args.recordingId, tabId: args.tabId || effectiveTabId, adaptive: args.adaptive
         });
 
       case 'wait':
@@ -1041,10 +1095,33 @@ export class AgentCore {
         return this._bgMsg('IMAGE_SAVE', { url: args.url });
 
       case 'web_search':
-        return this._bgMsg('WEB_SEARCH', { query: args.query, maxResults: args.maxResults });
+        return this._bgMsg('WEB_SEARCH', {
+          query: args.query,
+          maxResults: args.maxResults,
+          apiKey: this.apiKey,
+          cloudBase: this.cloudBase
+        });
+
+      case 'quick_report':
+        return this._bgMsg('QUICK_REPORT', {});
+
+      case 'dialog_detect':
+        return this._bgMsg('DOM_ACTION', { action: 'detect_dialogs', tabId: effectiveTabId });
+      case 'dialog_dismiss':
+        return this._bgMsg('DOM_ACTION', { action: 'dismiss_dialog', index: args.index, selector: args.selector, tabId: effectiveTabId });
+      case 'dialog_accept':
+        return this._bgMsg('DOM_ACTION', { action: 'accept_dialog', index: args.index, selector: args.selector, tabId: effectiveTabId });
+      case 'dialog_fill':
+        return this._bgMsg('DOM_ACTION', { action: 'fill_dialog', index: args.index, fields: args.fields, tabId: effectiveTabId });
+      case 'dialog_alert_intercept':
+        return this._bgMsg('DOM_ACTION', { action: 'alert_intercept', intercept: args.intercept, autoConfirm: args.autoConfirm, autoPrompt: args.autoPrompt, tabId: effectiveTabId });
+      case 'dialog_get_intercepted':
+        return this._bgMsg('DOM_ACTION', { action: 'get_alert_buffer', clear: args.clear, tabId: effectiveTabId });
+      case 'file_upload':
+        return this._bgMsg('FILE_UPLOAD', { selector: args.selector, fileName: args.fileName, content: args.content, url: args.url, mimeType: args.mimeType, tabId: effectiveTabId });
 
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, image_save, web_search.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, file_upload, quick_report.`);
     }
   }
 
@@ -1173,6 +1250,37 @@ export class AgentCore {
       };
       if (result.loginHint) out.loginHint = result.loginHint;
       return out;
+    }
+
+    // file_upload: confirm upload, don't send file content back
+    if (tool === 'file_upload') {
+      return { uploaded: true, fileName: result.fileName, mimeType: result.mimeType, size: result.size };
+    }
+
+    // dialog_detect: limit dialog count and truncate text
+    if (tool === 'dialog_detect' && result.dialogs) {
+      return {
+        count: result.count,
+        dialogs: result.dialogs.slice(0, 5).map(d => ({
+          index: d.index,
+          type: d.type,
+          rect: d.rect,
+          title: (d.title || '').substring(0, 100),
+          text: (d.text || '').substring(0, 200),
+          buttons: (d.buttons || []).slice(0, 8).map(b => ({ text: b.text, selector: b.selector })),
+          inputs: (d.inputs || []).slice(0, 6).map(i => ({ label: i.label, selector: i.selector, type: i.type, name: i.name }))
+        }))
+      };
+    }
+
+    // dialog_fill: just confirm what was filled
+    if (tool === 'dialog_fill') {
+      return { filled: result.filled?.map(f => ({ field: f.field, method: f.method })) || [], count: result.count };
+    }
+
+    // dialog_get_intercepted: return alert buffer
+    if (tool === 'dialog_get_intercepted') {
+      return { count: result.count, alerts: (result.alerts || []).slice(-15) };
     }
 
     // Generic: if JSON is very large, truncate

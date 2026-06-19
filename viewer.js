@@ -1,5 +1,7 @@
 // viewer.js — Agentia file viewer logic (extracted from inline to comply with MV3 CSP)
 
+import { fileStore } from './file-store.js';
+
 const params = new URLSearchParams(location.search);
 const fileKey = params.get('key');
 
@@ -18,8 +20,7 @@ async function load(silent = false) {
     return;
   }
 
-  const data = await chrome.storage.local.get(fileKey);
-  const file = data[fileKey];
+  const file = await fileStore.getFile(fileKey);
 
   if (!file) {
     document.getElementById('content-area').innerHTML =

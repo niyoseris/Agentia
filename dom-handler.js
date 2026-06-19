@@ -5,17 +5,18 @@ import { getActiveTabId } from './utils.js';
 export async function handleDomAction(payload, tabId) {
   const { action } = payload;
 
-  // Guard: can't inject scripts into chrome:// or extension pages
+  // Guard: tab ID must be valid — returns { error } if tab was closed or never existed
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab) {
-    const url = tab.url || '';
-    if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
-      await new Promise(r => setTimeout(r, 1500));
-      const refreshed = await chrome.tabs.get(tabId).catch(() => tab);
-      const newUrl = refreshed.url || '';
-      if (newUrl.startsWith('chrome://') || newUrl.startsWith('chrome-extension://') || newUrl.startsWith('about:')) {
-        return { error: `Cannot run DOM actions on internal page (${newUrl}). Use tab_navigate to load a real webpage first.` };
-      }
+  if (!tab) {
+    return { error: `Tab ${tabId} no longer exists — it was closed or navigated away. Try tab_get_active to find a working tab.` };
+  }
+  const url = tab.url || '';
+  if (url.startsWith('chrome://') || url.startsWith('chrome-extension://') || url.startsWith('about:')) {
+    await new Promise(r => setTimeout(r, 1500));
+    const refreshed = await chrome.tabs.get(tabId).catch(() => tab);
+    const newUrl = refreshed.url || '';
+    if (newUrl.startsWith('chrome://') || newUrl.startsWith('chrome-extension://') || newUrl.startsWith('about:')) {
+      return { error: `Cannot run DOM actions on internal page (${newUrl}). Use tab_navigate to load a real webpage first.` };
     }
   }
 
@@ -29,8 +30,17 @@ export async function handleDomAction(payload, tabId) {
       });
       return results[0]?.result;
     } catch (err) {
-      if (err.message?.includes('error page') && attempt < 2) {
-        // SPA is still loading — wait and retry
+      const msg = err.message || '';
+      // Stale tab / frame removed
+      if (msg.includes('No tab with id') || msg.includes('Frame with ID') || msg.includes('was removed')) {
+        return { error: `Tab ${tabId} is no longer available. Call tab_get_active to find the current active tab.` };
+      }
+      // Protected pages
+      if (msg.includes('cannot be scripted') || msg.includes('extensions gallery')) {
+        return { error: `Cannot interact with this page — it is a protected browser page. Navigate to a regular website first.` };
+      }
+      // SPA loading
+      if (msg.includes('error page') && attempt < 2) {
         await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
         continue;
       }
@@ -354,7 +364,395 @@ function executeDomAction(payload) {
       return result;
     }
 
+    // ── Dialog / Modal Management ──────────────────────────────────
+
+    case 'detect_dialogs': {
+      // Find ALL visible overlay/modal/dialog elements on the page
+      const dialogs = [];
+      const seen = new Set();
+
+      // 1. Native HTML <dialog open>
+      for (const d of document.querySelectorAll('dialog[open]')) {
+        if (seen.has(d)) continue;
+        seen.add(d);
+        const rect = d.getBoundingClientRect();
+        const buttons = Array.from(d.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]'))
+          .filter(b => b.offsetParent !== null || b.getBoundingClientRect().width > 0);
+        const inputs = Array.from(d.querySelectorAll('input:not([type="submit"]):not([type="button"]), textarea, select'))
+          .filter(i => i.offsetParent !== null || i.getBoundingClientRect().width > 0);
+        dialogs.push({
+          type: 'native-dialog',
+          element: 'dialog[open]',
+          index: dialogs.length,
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+          title: (d.querySelector('h1,h2,h3,h4,header,[role="heading"]') || {}).textContent?.trim() || '',
+          text: (d.textContent || '').trim().substring(0, 300),
+          buttons: buttons.map(b => ({
+            text: (b.textContent || '').trim().substring(0, 50),
+            selector: buildSimpleSelector(b)
+          })),
+          inputs: inputs.map(i => ({
+            label: findLabel(i),
+            selector: buildSimpleSelector(i),
+            type: i.type || i.tagName.toLowerCase(),
+            name: i.name || '',
+            placeholder: i.placeholder || ''
+          }))
+        });
+      }
+
+      // 2. aria-modal dialogs (Material UI, custom dialogs)
+      for (const d of document.querySelectorAll('[role="dialog"][aria-modal="true"], [role="alertdialog"]')) {
+        if (seen.has(d)) continue;
+        const rect = d.getBoundingClientRect();
+        if (rect.width < 10 || rect.height < 10) continue;
+        seen.add(d);
+        const buttons = Array.from(d.querySelectorAll('button, [role="button"], input[type="submit"], input[type="button"]'))
+          .filter(b => (b.offsetParent !== null || b.getBoundingClientRect().width > 0));
+        const inputs = Array.from(d.querySelectorAll('input:not([type="submit"]):not([type="button"]), textarea, select'))
+          .filter(i => (i.offsetParent !== null || i.getBoundingClientRect().width > 0));
+        dialogs.push({
+          type: 'aria-dialog',
+          element: d.getAttribute('role') || 'dialog',
+          index: dialogs.length,
+          rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+          title: (d.querySelector('h1,h2,h3,h4,header,[role="heading"],.modal-title,.dialog-title,.MuiDialogTitle-root') || {}).textContent?.trim() || '',
+          text: (d.textContent || '').trim().substring(0, 300),
+          buttons: buttons.map(b => ({
+            text: (b.textContent || '').trim().substring(0, 50),
+            selector: buildSimpleSelector(b)
+          })),
+          inputs: inputs.map(i => ({
+            label: findLabel(i),
+            selector: buildSimpleSelector(i),
+            type: i.type || i.tagName.toLowerCase(),
+            name: i.name || '',
+            placeholder: i.placeholder || ''
+          }))
+        });
+      }
+
+      // 3. Common modal/overlay patterns (Bootstrap, custom)
+      const modalSelectors = [
+        '.modal:not([style*="display: none"])', '.modal.show', '.modal.fade.show',
+        '[class*="modal"][class*="visible"]', '[class*="overlay"][class*="visible"]',
+        '.MuiDialog-root', '.MuiModal-root',
+        '[class*="dialog"][class*="open"]', '[class*="popup"][class*="open"]',
+        '.cookie-banner:not([hidden])', '[class*="cookie"]:not([hidden])', '[class*="consent"]:not([hidden])',
+        '[class*="toast"]:not([hidden])'
+      ];
+      for (const sel of modalSelectors) {
+        try {
+          for (const d of document.querySelectorAll(sel)) {
+            if (seen.has(d)) continue;
+            const style = window.getComputedStyle(d);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+            const rect = d.getBoundingClientRect();
+            if (rect.width < 50 || rect.height < 20) continue;
+            seen.add(d);
+            const buttons = Array.from(d.querySelectorAll('button, [role="button"], a[role="button"], input[type="submit"], input[type="button"]'))
+              .filter(b => (b.offsetParent !== null || b.getBoundingClientRect().width > 0));
+            const inputs = Array.from(d.querySelectorAll('input:not([type="submit"]):not([type="button"]), textarea, select'))
+              .filter(i => (i.offsetParent !== null || i.getBoundingClientRect().width > 0));
+            dialogs.push({
+              type: 'overlay-modal',
+              element: sel,
+              index: dialogs.length,
+              rect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+              title: (d.querySelector('h1,h2,h3,h4,header,[role="heading"],.modal-title,.dialog-title') || {}).textContent?.trim() || '',
+              text: (d.textContent || '').trim().substring(0, 300),
+              buttons: buttons.map(b => ({
+                text: (b.textContent || '').trim().substring(0, 50),
+                selector: buildSimpleSelector(b)
+              })),
+              inputs: inputs.map(i => ({
+                label: findLabel(i),
+                selector: buildSimpleSelector(i),
+                type: i.type || i.tagName.toLowerCase(),
+                name: i.name || '',
+                placeholder: i.placeholder || ''
+              }))
+            });
+          }
+        } catch {}
+      }
+
+      return { count: dialogs.length, dialogs };
+    }
+
+    case 'dismiss_dialog': {
+      const index = payload.index || 0;
+      const { dialogs } = executeDomAction({ action: 'detect_dialogs' });
+
+      if (index >= dialogs.length) {
+        return { error: `Dialog index ${index} not found. Total dialogs: ${dialogs.length}` };
+      }
+
+      const dialog = dialogs[index];
+
+      // Strategy 1: custom selector provided
+      if (payload.selector) {
+        const el = document.querySelector(payload.selector);
+        if (el) { el.click(); return { dismissed: true, method: 'custom-selector' }; }
+      }
+
+      // Strategy 2: find close/cancel/no button by text
+      const dismissKeywords = ['cancel', 'close', 'no', 'dismiss', 'decline', 'reject', 'later', 'x', '✕', '×', 'skip', 'ignore', 'kapat', 'hayır', 'iptal', 'vazgeç'];
+      const buttons = document.querySelectorAll('button, [role="button"], a[role="button"], input[type="button"]');
+      for (const btn of buttons) {
+        const text = (btn.textContent || btn.value || '').trim().toLowerCase();
+        const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+        if (dismissKeywords.some(k => text === k || text.includes(k) || aria === k || aria.includes(k))) {
+          // Only click if the button is visible
+          if (btn.offsetParent !== null || btn.getBoundingClientRect().width > 0) {
+            btn.click();
+            return { dismissed: true, method: 'text-match', text: (btn.textContent || '').trim().substring(0, 30) };
+          }
+        }
+      }
+
+      // Strategy 3: native dialog.close()
+      const dialogEl = document.querySelector('dialog[open]');
+      if (dialogEl) {
+        dialogEl.close();
+        return { dismissed: true, method: 'dialog.close()' };
+      }
+
+      // Strategy 4: press Escape key
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true }));
+      return { dismissed: true, method: 'escape-key' };
+    }
+
+    case 'accept_dialog': {
+      const index = payload.index || 0;
+      const { dialogs } = executeDomAction({ action: 'detect_dialogs' });
+
+      if (index >= dialogs.length) {
+        return { error: `Dialog index ${index} not found. Total dialogs: ${dialogs.length}` };
+      }
+
+      const dialog = dialogs[index];
+
+      // Strategy 1: custom selector
+      if (payload.selector) {
+        const el = document.querySelector(payload.selector);
+        if (el) { el.click(); return { accepted: true, method: 'custom-selector' }; }
+      }
+
+      // Strategy 2: use the buttons from detect_dialogs — prefer confirm/ok/yes
+      const acceptKeywords = ['ok', 'yes', 'confirm', 'accept', 'agree', 'allow', 'continue', 'submit', 'save', 'send', 'tamam', 'evet', 'kabul', 'onayla', 'gönder', 'kaydet'];
+      const dialogButtons = dialog.buttons || [];
+      // First pass: text match
+      for (const b of dialogButtons) {
+        const text = (b.text || '').toLowerCase();
+        if (acceptKeywords.some(k => text === k || text.includes(k))) {
+          if (b.selector) {
+            const el = document.querySelector(b.selector);
+            if (el) { el.click(); return { accepted: true, method: 'text-match', text: b.text }; }
+          }
+        }
+      }
+      // Second pass: first button that looks like confirm (not cancel/close)
+      for (const b of dialogButtons) {
+        const text = (b.text || '').toLowerCase();
+        const isDismiss = ['cancel', 'close', 'no', 'dismiss', 'decline', 'x', '✕', '×', 'skip', 'kapat', 'hayır', 'iptal'].some(k => text === k || text.includes(k));
+        if (!isDismiss && b.selector) {
+          const el = document.querySelector(b.selector);
+          if (el) { el.click(); return { accepted: true, method: 'first-non-dismiss', text: b.text }; }
+        }
+      }
+
+      // Strategy 3: press Enter key
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      return { accepted: true, method: 'enter-key' };
+    }
+
+    case 'fill_dialog': {
+      const index = payload.index || 0;
+      const { dialogs } = executeDomAction({ action: 'detect_dialogs' });
+
+      if (index >= dialogs.length) {
+        return { error: `Dialog index ${index} not found. Total dialogs: ${dialogs.length}` };
+      }
+
+      const dialog = dialogs[index];
+      const fields = payload.fields || {};
+      const filled = [];
+
+      for (const dialogInput of (dialog.inputs || [])) {
+        const labelLower = (dialogInput.label + ' ' + dialogInput.name + ' ' + dialogInput.placeholder).toLowerCase();
+        for (const [key, value] of Object.entries(fields)) {
+          const keyLower = key.toLowerCase();
+          if (labelLower.includes(keyLower) || keyLower.includes(labelLower.substring(0, 10))) {
+            const el = dialogInput.selector ? document.querySelector(dialogInput.selector) : null;
+            if (el) {
+              if (el.tagName === 'SELECT') {
+                // Try matching option
+                const opts = Array.from(el.options);
+                const match = opts.find(o => (o.text || '').toLowerCase().includes(String(value).toLowerCase()));
+                if (match) {
+                  el.value = match.value;
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                  filled.push({ field: key, value: match.value, method: 'select' });
+                }
+              } else if (el.type === 'checkbox' || el.type === 'radio') {
+                el.checked = ['true', 'yes', '1', 'on'].includes(String(value).toLowerCase());
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                filled.push({ field: key, value: el.checked, method: el.type });
+              } else {
+                // Use the native setter approach
+                const nativeProto = el.tagName === 'TEXTAREA'
+                  ? window.HTMLTextAreaElement.prototype
+                  : window.HTMLInputElement.prototype;
+                const nativeSetter = Object.getOwnPropertyDescriptor(nativeProto, 'value')?.set;
+                if (nativeSetter) nativeSetter.call(el, String(value));
+                else el.value = String(value);
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                filled.push({ field: key, value: String(value), method: 'input' });
+              }
+            }
+            break; // Matched — move to next dialog input
+          }
+        }
+      }
+
+      return { filled, count: filled.length };
+    }
+
+    case 'alert_intercept': {
+      const intercept = payload.intercept !== false; // Default: true
+      if (!window.__agentia) window.__agentia = {};
+      if (!window.__agentia._alertBuffer) window.__agentia._alertBuffer = [];
+      if (!window.__agentia._origAlert) {
+        window.__agentia._origAlert = window.alert;
+        window.__agentia._origConfirm = window.confirm;
+        window.__agentia._origPrompt = window.prompt;
+      }
+
+      if (intercept) {
+        window.alert = function (msg) {
+          window.__agentia._alertBuffer.push({ type: 'alert', message: String(msg || ''), time: Date.now() });
+        };
+        window.confirm = function (msg) {
+          const result = payload.autoConfirm !== false; // Default: true
+          window.__agentia._alertBuffer.push({ type: 'confirm', message: String(msg || ''), autoResponse: result, time: Date.now() });
+          return result;
+        };
+        window.prompt = function (msg, defaultText) {
+          const result = payload.autoPrompt || '';
+          window.__agentia._alertBuffer.push({ type: 'prompt', message: String(msg || ''), autoResponse: result, time: Date.now() });
+          return result;
+        };
+        return { intercepted: true, note: 'alert/confirm/prompt now auto-handled. Calls recorded in buffer.' };
+      } else {
+        // Restore originals
+        if (window.__agentia._origAlert) window.alert = window.__agentia._origAlert;
+        if (window.__agentia._origConfirm) window.confirm = window.__agentia._origConfirm;
+        if (window.__agentia._origPrompt) window.prompt = window.__agentia._origPrompt;
+        return { restored: true, note: 'Original alert/confirm/prompt restored.' };
+      }
+    }
+
+    case 'get_alert_buffer': {
+      if (!window.__agentia || !window.__agentia._alertBuffer) {
+        return { count: 0, alerts: [] };
+      }
+      const alerts = [...window.__agentia._alertBuffer];
+      if (payload.clear !== false) {
+        window.__agentia._alertBuffer = [];
+      }
+      return { count: alerts.length, alerts: alerts.slice(-20) };
+    }
+
+    case 'set_file_input': {
+      const el = document.querySelector(selector);
+      if (!el) return { error: `File input not found: ${selector}` };
+      if (el.type !== 'file') return { error: `Element is not a file input (type=${el.type})` };
+
+      let content = payload.content || '';
+      let fileName = payload.fileName || 'file.txt';
+      let mimeType = payload.mimeType;
+
+      // Auto-detect MIME from extension
+      if (!mimeType) {
+        const ext = fileName.split('.').pop()?.toLowerCase();
+        const mimeMap = {
+          pdf: 'application/pdf', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+          gif: 'image/gif', svg: 'image/svg+xml', webp: 'image/webp',
+          txt: 'text/plain', csv: 'text/csv', json: 'application/json', xml: 'application/xml',
+          html: 'text/html', css: 'text/css', js: 'text/javascript',
+          zip: 'application/zip', doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+          xls: 'application/vnd.ms-excel', xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        };
+        mimeType = mimeMap[ext] || 'application/octet-stream';
+      }
+
+      // If content is base64 encoded (from background fetch), decode it
+      if (payload.isBase64) {
+        try {
+          const binary = atob(content);
+          const bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          content = bytes.buffer;
+        } catch (e) {
+          // If decode fails, use as-is
+        }
+      }
+
+      const file = new File([content], fileName, { type: mimeType });
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      el.files = dt.files;
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return { uploaded: true, fileName, mimeType, size: content.byteLength || content.length };
+    }
+
     default:
       return { error: `Unknown DOM action: ${action}` };
+  }
+
+  // ── Helper: find label text for an input ────────────────────────
+  function findLabel(el) {
+    if (el.labels && el.labels.length > 0) return el.labels[0].textContent.trim();
+    if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+    if (el.placeholder) return el.placeholder;
+    // Check preceding sibling or parent for label text
+    const prev = el.previousElementSibling;
+    if (prev && (prev.tagName === 'LABEL' || prev.textContent?.trim().length < 60)) return prev.textContent.trim();
+    const parentLabel = el.closest('label');
+    if (parentLabel) return parentLabel.textContent.replace(el.textContent || '', '').trim();
+    return '';
+  }
+
+  // ── Helper: build a simple unique selector ──────────────────────
+  function buildSimpleSelector(el) {
+    if (el.id) return `#${CSS.escape(el.id)}`;
+    if (el.getAttribute('data-testid')) return `[data-testid="${CSS.escape(el.getAttribute('data-testid'))}"]`;
+    if (el.getAttribute('aria-label')) return `[aria-label="${CSS.escape(el.getAttribute('aria-label'))}"]`;
+    if (el.name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
+    if (el.className && typeof el.className === 'string') {
+      const cls = el.className.split(' ').filter(c => c && c.length > 1 && c.length < 40)[0];
+      if (cls) {
+        const sel = `${el.tagName.toLowerCase()}.${CSS.escape(cls)}`;
+        if (document.querySelectorAll(sel).length === 1) return sel;
+      }
+    }
+    // Fallback: nth-child path
+    const path = [];
+    let node = el;
+    let depth = 0;
+    while (node && node !== document.body && depth < 3) {
+      const parent = node.parentElement;
+      if (!parent) break;
+      const siblings = Array.from(parent.children).filter(c => c.tagName === node.tagName);
+      const nth = siblings.length > 1 ? `:nth-child(${Array.from(parent.children).indexOf(node) + 1})` : '';
+      path.unshift(node.tagName.toLowerCase() + nth);
+      node = parent;
+      depth++;
+    }
+    return path.join(' > ');
   }
 }

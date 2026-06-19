@@ -1,5 +1,7 @@
 // Agentia Side Panel — Main UI Logic
 
+import { addModelToHistory } from './settings-handler.js';
+
 const bg = (type, payload) =>
   new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type, payload }, (res) => {
@@ -104,6 +106,14 @@ function updateModelBadge(model) {
   badge.textContent = model ? model.split(':')[0] : '—';
 }
 
+function populateModelHistory(history, currentModel) {
+  const select = document.getElementById('model-history');
+  if (!select) return;
+  const items = Array.isArray(history) ? history : [];
+  select.innerHTML = '<option value="">— Kayıtlı model seç —</option>' +
+    items.map(m => `<option value="${escHtml(m)}"${m === currentModel ? ' selected' : ''}>${escHtml(m)}</option>`).join('');
+}
+
 async function loadSettings() {
   try {
     const s = await bg('GET_SETTINGS', {});
@@ -114,6 +124,7 @@ async function loadSettings() {
       toggleCloudMode(true);
     }
     if (s.model) document.getElementById('model-input').value = s.model;
+    populateModelHistory(s.modelHistory || [], s.model);
     if (s.temperature !== undefined) {
       document.getElementById('temperature').value = s.temperature;
       document.getElementById('temperature-val').textContent = s.temperature;
@@ -142,6 +153,13 @@ function setupSettings() {
 
   document.getElementById('model-input').addEventListener('input', (e) => {
     updateModelBadge(e.target.value);
+  });
+
+  document.getElementById('model-history').addEventListener('change', (e) => {
+    const model = e.target.value;
+    if (!model) return;
+    document.getElementById('model-input').value = model;
+    updateModelBadge(model);
   });
 
   document.getElementById('test-connection-btn').addEventListener('click', async () => {
@@ -173,11 +191,12 @@ function setupSettings() {
   });
 
   document.getElementById('save-settings-btn').addEventListener('click', async () => {
-    const settings = {
+    const currentModel = document.getElementById('model-input').value.trim();
+    const base = {
       ollamaUrl: document.getElementById('ollama-url').value,
       apiKey: document.getElementById('api-key').value,
       useCloud: document.getElementById('use-cloud').checked,
-      model: document.getElementById('model-input').value.trim(),
+      model: currentModel,
       temperature: parseFloat(document.getElementById('temperature').value),
       maxTokens: parseInt(document.getElementById('max-tokens').value),
       systemPrompt: document.getElementById('system-prompt').value,
@@ -187,10 +206,12 @@ function setupSettings() {
       visionEnabled: document.getElementById('vision-enabled').value,
       autoRecord: document.getElementById('auto-record').checked
     };
+    const settings = addModelToHistory(base, currentModel);
     try {
       await bg('SAVE_SETTINGS', settings);
       showConnectionResult('✓ Ayarlar kaydedildi', true);
       updateModelBadge(settings.model);
+      populateModelHistory(settings.modelHistory, settings.model);
     } catch (err) {
       showConnectionResult('Hata: ' + err.message, false);
     }
@@ -393,6 +414,7 @@ function setupTask() {
   document.getElementById('run-task-btn').addEventListener('click', runTask);
   document.getElementById('stop-task-btn').addEventListener('click', stopTask);
   document.getElementById('stop-task-btn-2').addEventListener('click', stopTask);
+  document.getElementById('quick-report-btn').addEventListener('click', quickReport);
   document.getElementById('task-new-btn').addEventListener('click', resetTaskSession);
 
   const continueInput = document.getElementById('task-continue-input');
@@ -417,11 +439,13 @@ function setTaskRunning(running, label = '') {
   const stopBtn2 = document.getElementById('stop-task-btn-2');
   const continueArea = document.getElementById('task-continue-area');
   const runBtn = document.getElementById('run-task-btn');
+  const quickReportBtn = document.getElementById('quick-report-btn');
 
   if (running) {
     // Running state
     stopBtn.style.display = 'inline-flex';
     stopBtn2.style.display = 'inline-flex';
+    quickReportBtn.style.display = 'inline-flex';
     statusEl.textContent = label || 'Çalışıyor...';
     status2El.textContent = label || 'Çalışıyor...';
     continueArea.style.display = 'none';
@@ -430,6 +454,7 @@ function setTaskRunning(running, label = '') {
     // Idle state
     stopBtn.style.display = 'none';
     stopBtn2.style.display = 'none';
+    quickReportBtn.style.display = 'none';
     statusEl.textContent = '';
     status2El.textContent = '';
     runBtn.style.display = 'inline-flex';
@@ -504,10 +529,10 @@ async function continueTask() {
   const text = input.value.trim();
   if (!text) return;
 
-  // Refresh active tab — prevents stale tab ID errors on continuation
-  await getCurrentTab();
-  if (!currentTabId) {
-    taskLog('error', '✗ Aktif sekme bulunamadı. Lütfen bir sayfa açın.');
+  // Do NOT refresh active tab on continuation — the agent tracks its own tabs.
+  // If no session exists, require the user to start a new task.
+  if (!taskSessionMessages || taskSessionMessages.length === 0) {
+    taskLog('error', '✗ Devam edilecek bir görev oturumu yok. Lütfen yeni görev başlatın.');
     setTaskRunning(false);
     return;
   }
@@ -529,9 +554,9 @@ async function continueTask() {
 
   try {
     // Fire-and-forget: result arrives via AGENT_EVENT
+    // tabId is intentionally omitted so the agent continues from its own focused tab
     await bgWithRetry('AGENT_RUN_TASK', {
       task: text,
-      tabId: currentTabId,
       messages: taskSessionMessages  // Pass full prior context
     });
   } catch (err) {
@@ -551,6 +576,20 @@ async function stopTask() {
   showContinueArea(false);
 }
 
+async function quickReport() {
+  if (!isRunningTask) {
+    taskLog('info', '⚠ Hızlı rapor yalnızca aktif görev sırasında kullanılabilir');
+    return;
+  }
+  taskLog('info', '📄 Hızlı rapor oluşturuluyor...');
+  try {
+    const result = await bgWithRetry('QUICK_REPORT', {});
+    taskLog('result', `✓ Hızlı rapor açıldı: ${result?.url || result?.fileKey || ''}`, JSON.stringify(result, null, 2));
+  } catch (err) {
+    taskLog('error', '✗ Hızlı rapor hatası: ' + err.message, err.message);
+  }
+}
+
 function handleAgentEvent(data) {
   if (!data) return;
   switch (data.type) {
@@ -558,24 +597,26 @@ function handleAgentEvent(data) {
       taskLog('info', '▶ Görev başlatıldı');
       break;
     case 'AGENT_THOUGHT':
-      // Show a summary of thought (first 120 chars)
+      // Show a summary of thought, expandable for full content
       if (data.content && !data.content.includes('<tool_call>')) {
-        taskLog('thought', '💭 ' + data.content.substring(0, 120) + (data.content.length > 120 ? '...' : ''));
+        const summary = data.content.substring(0, 150);
+        const fullThought = data.content;
+        taskLog('thought', '💭 ' + summary + (data.content.length > 150 ? '...' : ''), fullThought);
       }
       break;
     case 'TOOL_CALL':
-      taskLog('tool', `🔧 ${data.tool}(${JSON.stringify(data.args).substring(0, 80)})`);
+      taskLog('tool', `🔧 ${data.tool}(${JSON.stringify(data.args).substring(0, 120)})`, JSON.stringify(data.args));
       break;
     case 'TOOL_RESULT':
-      taskLog('result', `✓ ${data.tool}: ${JSON.stringify(data.result).substring(0, 80)}`);
+      taskLog('result', `✓ ${data.tool}: ${JSON.stringify(data.result).substring(0, 120)}`, JSON.stringify(data.result, null, 2));
       break;
     case 'TOOL_ERROR':
-      taskLog('error', `✗ ${data.tool}: ${data.error}`);
+      taskLog('error', `✗ ${data.tool}: ${data.error}`, data.error);
       break;
     case 'TASK_COMPLETE':
       // Save messages for continuation, update UI
       if (data.messages) taskSessionMessages = data.messages;
-      taskLog('final', '✓ Görev tamamlandı: ' + (data.result || '').substring(0, 120));
+      taskLog('final', '✓ Görev tamamlandı: ' + (data.result || '').substring(0, 200), data.result || '');
       setTaskRunning(false);
       showContinueArea(true);
       refreshHistory();
@@ -589,10 +630,16 @@ function handleAgentEvent(data) {
       break;
     case 'TASK_ERROR':
       if (data.messages?.length > 0) taskSessionMessages = data.messages;
-      taskLog('error', '✗ Görev hatası: ' + (data.error || 'Bilinmeyen hata'));
+      taskLog('error', '✗ Görev hatası: ' + (data.error || 'Bilinmeyen hata'), data.error);
       setTaskRunning(false);
       showContinueArea(false);
       refreshHistory();
+      break;
+    case 'QUICK_REPORT_READY':
+      taskLog('result', `✓ Hızlı rapor hazır: ${data.url || data.fileKey}`, JSON.stringify(data, null, 2));
+      break;
+    case 'QUICK_REPORT_ERROR':
+      taskLog('error', '✗ Hızlı rapor oluşturulamadı: ' + (data.error || 'Bilinmeyen hata'), data.error);
       break;
     case 'ADAPTIVE_REPLAY_START':
       taskLog('info', `🔄 Adaptif tekrar başladı: ${data.recording}`);
@@ -611,12 +658,51 @@ function handleAgentEvent(data) {
   }
 }
 
-function taskLog(type, text) {
+function taskLog(type, text, fullText) {
   const log = document.getElementById('task-log');
   const entry = document.createElement('div');
   entry.className = `log-entry ${type}`;
+
   const time = new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  entry.textContent = `[${time}] ${text}`;
+  const prefix = `[${time}] `;
+  const displayText = prefix + text;
+
+  // If there's more detail available (fullText exists), make it expandable
+  const hasMore = fullText && fullText.length > 0;
+  const isTruncated = hasMore && text.length < fullText?.length;
+
+  if (isTruncated) {
+    entry.innerHTML = `<span class="log-summary">${escHtml(displayText)}</span>`;
+    entry.title = 'Tıklayarak tam metni göster';
+    entry.style.cursor = 'pointer';
+    entry.dataset.fulltext = fullText;
+    entry.dataset.summary = displayText;
+    entry.dataset.expanded = 'false';
+
+    entry.addEventListener('click', () => {
+      const expanded = entry.dataset.expanded === 'true';
+      if (expanded) {
+        // Collapse
+        entry.querySelector('.log-summary').textContent = entry.dataset.summary;
+        const detail = entry.querySelector('.log-detail');
+        if (detail) detail.remove();
+        entry.dataset.expanded = 'false';
+        entry.title = 'Tıklayarak tam metni göster';
+      } else {
+        // Expand
+        const detail = document.createElement('pre');
+        detail.className = 'log-detail';
+        detail.textContent = entry.dataset.fulltext;
+        entry.appendChild(detail);
+        entry.dataset.expanded = 'true';
+        entry.title = 'Tıklayarak kısalt';
+      }
+      log.scrollTop = log.scrollHeight;
+    });
+  } else {
+    entry.textContent = displayText;
+  }
+
   log.appendChild(entry);
   log.scrollTop = log.scrollHeight;
 }

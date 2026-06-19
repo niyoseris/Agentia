@@ -1,5 +1,6 @@
 // Agentia Content Script — injected into every page
-// Handles recording (event capture) and DOM interaction feedback
+// Handles recording (event capture), DOM interaction feedback,
+// and loads the injected.js helper for advanced page operations
 
 (function () {
   'use strict';
@@ -8,6 +9,25 @@
   let recordingId = null;
   let lastScrollTime = 0;
   let highlightEl = null;
+
+  // ── Load injected.js into the page context ───────────────────────
+  // This makes window.__agentia functions available for DOM_ACTION calls
+  // (alert interception, file upload, drag-drop, shadow DOM piercing)
+  function injectScript() {
+    try {
+      // Guard: XML pages (sitemaps, RSS) don't have head/HTML DOM — skip injection
+      if (!document.head && !document.body) return;
+      if (document.querySelector('script[data-agentia-injected]')) return;
+      const script = document.createElement('script');
+      script.src = chrome.runtime.getURL('injected.js');
+      script.setAttribute('data-agentia-injected', 'true');
+      script.onload = () => script.remove();
+      (document.head || document.documentElement).appendChild(script);
+    } catch {
+      // XML pages or restricted contexts — injected.js is optional, skip silently
+    }
+  }
+  injectScript();
 
   // ---- Message listener from background ----
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

@@ -13,11 +13,13 @@ import { startRecording, stopRecording, getActiveRecording, setActiveRecording, 
 import { getSettings, saveSettings } from './settings-handler.js';
 import { getTaskHistory, saveTaskHistory, deleteTaskHistory } from './ollama-handler.js';
 import { getActiveTabId } from './utils.js';
+import { fileStore } from './file-store.js';
 
 const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
 let actionStore = null;
 let memoryStore = null;
+let fileStoreReady = null;
 let initPromise = null;
 let currentTaskController = null;
 let activeTaskId = null;
@@ -60,6 +62,17 @@ async function init() {
   memoryStore = new MemoryStore();
   await memoryStore.load();
   agentCore.memoryStore = memoryStore;
+
+  // Open IndexedDB file store and migrate any files still in chrome.storage.local
+  try {
+    fileStoreReady = fileStore.open().then(async () => {
+      const migrated = await fileStore.migrateFromChromeStorage();
+      if (migrated > 0) console.log('[Agentia] Migrated', migrated, 'files from chrome.storage.local to IndexedDB');
+    });
+    await fileStoreReady;
+  } catch (dbErr) {
+    console.warn('[Agentia] IndexedDB file store init failed:', dbErr.message);
+  }
 
   // Restore active recording state after service worker restart
   const sessionData = await chrome.storage.session.get('agentia_active_recording');
@@ -293,13 +306,12 @@ async function handleMessage(message, sender, sendResponse) {
 
       case 'CREATE_FILE': {
         const fileKey = `agentia_file_${Date.now()}`;
-        await chrome.storage.local.set({
-          [fileKey]: {
-            name: payload.name,
-            content: payload.content,
-            type: payload.type || 'text',
-            created: Date.now()
-          }
+        await fileStore.saveFile(fileKey, {
+          name: payload.name,
+          content: payload.content,
+          type: payload.type || 'text',
+          created: Date.now(),
+          updated: Date.now()
         });
         const viewerUrl = chrome.runtime.getURL(`viewer.html?key=${fileKey}`);
         const tab = await chrome.tabs.create({ url: viewerUrl, active: true });
@@ -309,14 +321,12 @@ async function handleMessage(message, sender, sendResponse) {
 
       case 'FILE_CREATE': {
         const fileKey = `agentia_file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        await chrome.storage.local.set({
-          [fileKey]: {
-            name: payload.name,
-            content: payload.content || '',
-            type: payload.type || 'html',
-            created: Date.now(),
-            updated: Date.now()
-          }
+        await fileStore.saveFile(fileKey, {
+          name: payload.name,
+          content: payload.content || '',
+          type: payload.type || 'html',
+          created: Date.now(),
+          updated: Date.now()
         });
         sendResponse({ success: true, data: { fileKey } });
         break;
@@ -327,14 +337,18 @@ async function handleMessage(message, sender, sendResponse) {
           sendResponse({ success: false, error: 'Invalid fileKey: must start with agentia_file_' });
           break;
         }
-        const existing = await chrome.storage.local.get(payload.fileKey);
-        if (!existing[payload.fileKey]) {
+        const existing = await fileStore.getFile(payload.fileKey);
+        if (!existing) {
           sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
           break;
         }
-        existing[payload.fileKey].content = payload.content;
-        existing[payload.fileKey].updated = Date.now();
-        await chrome.storage.local.set({ [payload.fileKey]: existing[payload.fileKey] });
+        await fileStore.saveFile(payload.fileKey, {
+          name: existing.name,
+          content: payload.content,
+          type: existing.type,
+          created: existing.created,
+          updated: Date.now()
+        });
         sendResponse({ success: true, data: { fileKey: payload.fileKey, updated: true } });
         break;
       }
@@ -344,8 +358,8 @@ async function handleMessage(message, sender, sendResponse) {
           sendResponse({ success: false, error: 'Invalid fileKey: must start with agentia_file_' });
           break;
         }
-        const checkData = await chrome.storage.local.get(payload.fileKey);
-        if (!checkData[payload.fileKey]) {
+        const checkData = await fileStore.getFile(payload.fileKey);
+        if (!checkData) {
           sendResponse({ success: false, error: `File not found: ${payload.fileKey}` });
           break;
         }
@@ -437,14 +451,110 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'WEB_SEARCH': {
-        const searchResult = await handleWebSearch(payload);
+        const searchResult = await handleWebSearch({
+          ...payload,
+          apiKey: payload.apiKey || agentCore.apiKey,
+          cloudBase: payload.cloudBase || agentCore.cloudBase
+        });
         sendResponse({ success: true, data: searchResult });
+        break;
+      }
+
+      case 'QUICK_REPORT': {
+        // Generate a report from the research collected so far without stopping the task
+        if (!currentTaskController) {
+          sendResponse({ success: false, error: 'Aktif görev yok — hızlı rapor yalnızca görev çalışırken kullanılabilir' });
+          break;
+        }
+        if (!agentCore.currentResearchBuffer || agentCore.currentResearchBuffer.length === 0) {
+          sendResponse({ success: false, error: 'Henüz araştırma verisi toplanmadı' });
+          break;
+        }
+        try {
+          const html = await agentCore.buildQuickReportHtml();
+          if (!html) throw new Error('HTML rapor oluşturulamadı');
+
+          const fileKey = `agentia_file_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+          const reportName = `Hızlı Rapor - ${agentCore.currentTaskDescription.substring(0, 50)}`;
+          await fileStore.saveFile(fileKey, {
+            name: reportName,
+            content: html,
+            type: 'html',
+            created: Date.now(),
+            updated: Date.now()
+          });
+
+          const openUrl = chrome.runtime.getURL(`viewer.html?key=${fileKey}`);
+          const openedTab = await chrome.tabs.create({ url: openUrl, active: true });
+
+          chrome.runtime.sendMessage({
+            type: 'AGENT_EVENT',
+            data: { type: 'QUICK_REPORT_READY', fileKey, url: openUrl }
+          }).catch((e) => { console.warn('[Agentia] Quick report event failed:', e.message); });
+
+          sendResponse({ success: true, data: { fileKey, url: openUrl, tabId: openedTab.id } });
+        } catch (err) {
+          chrome.runtime.sendMessage({
+            type: 'AGENT_EVENT',
+            data: { type: 'QUICK_REPORT_ERROR', error: err.message }
+          }).catch((e) => { console.warn('[Agentia] Quick report event failed:', e.message); });
+          sendResponse({ success: false, error: err.message });
+        }
         break;
       }
 
       case 'IMAGE_SAVE': {
         const imageResult = await handleImageSave(payload.url);
         sendResponse({ success: true, data: imageResult });
+        break;
+      }
+
+      case 'FILE_UPLOAD': {
+        const uploadTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        if (!uploadTabId) throw new Error('No active tab for file upload');
+
+        let fileContent = payload.content || '';
+        let fileName = payload.fileName || 'file.txt';
+
+        // If a URL is provided, fetch it from the background (avoids CORS)
+        if (payload.url && !payload.content) {
+          try {
+            const fileRes = await fetch(payload.url);
+            if (!fileRes.ok) throw new Error(`Failed to fetch file: ${fileRes.status}`);
+            const blob = await fileRes.blob();
+            // For binary files, convert to base64 and pass as text
+            const buffer = await blob.arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+            fileContent = btoa(binary);
+            fileName = fileName || payload.url.split('/').pop() || 'file.bin';
+            // Execute upload via DOM_ACTION with base64 content
+            const uploadResult = await handleDomAction({
+              action: 'set_file_input',
+              selector: payload.selector,
+              fileName: fileName,
+              content: fileContent,
+              mimeType: payload.mimeType,
+              isBase64: true
+            }, uploadTabId);
+            // Decode the base64 size for the response
+            sendResponse({ success: true, data: { ...uploadResult, size: Math.round(buffer.byteLength) } });
+            break;
+          } catch (fetchErr) {
+            sendResponse({ success: false, error: `File fetch failed: ${fetchErr.message}` });
+            break;
+          }
+        }
+
+        // Direct content upload (text content provided by agent)
+        const uploadResult = await handleDomAction({
+          action: 'set_file_input',
+          selector: payload.selector,
+          fileName: fileName,
+          content: fileContent,
+          mimeType: payload.mimeType
+        }, uploadTabId);
+        sendResponse({ success: true, data: uploadResult });
         break;
       }
 

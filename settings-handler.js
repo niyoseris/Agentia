@@ -12,8 +12,19 @@ const DEFAULT_SETTINGS = {
   replayDelay: 500,
   maxIterations: 0,
   thinkingMode: 'off',
-  visionEnabled: 'auto'   // 'auto' = detect, 'on' = force on, 'off' = force off
+  visionEnabled: 'auto',   // 'auto' = detect, 'on' = force on, 'off' = force off
+  modelHistory: []
 };
+
+export function addModelToHistory(settings, model) {
+  const m = (model || '').trim();
+  if (!m) return settings;
+  const history = Array.isArray(settings.modelHistory) ? settings.modelHistory : [];
+  const filtered = history.filter(item => item !== m);
+  const next = [m, ...filtered];
+  if (next.length > 20) next.length = 20;
+  return { ...settings, modelHistory: next };
+}
 
 export async function getSettings() {
   const data = await chrome.storage.local.get('agentia_settings');

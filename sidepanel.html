@@ -68,9 +68,10 @@
           placeholder="Görevi tanımla... Örn: 'Google'da Chrome extension ara ve ilk sonucu aç' veya 'Bu sayfadaki tüm linkleri bul'"
         ></textarea>
 
-        <div style="display:flex; gap:8px; align-items:center;">
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
           <button class="btn btn-primary" id="run-task-btn">▶ Görevi Çalıştır</button>
           <button class="btn btn-secondary" id="stop-task-btn" style="display:none;">■ Durdur</button>
+          <button class="btn btn-success" id="quick-report-btn" style="display:none;">📄 Hızlı Rapor</button>
           <div id="task-status" style="font-size:12px; color:var(--text3);"></div>
         </div>
       </div>
@@ -196,12 +197,19 @@
               <span style="color:var(--text3); font-weight:400;"> — ollama.com/settings/keys</span>
             </label>
             <input type="password" class="form-input" id="api-key" placeholder="sk-...">
+            <div style="font-size:11px; color:var(--text3); margin-top:4px;">
+              Bu key aynı zamanda Ollama Web Search için kullanılır (varsayılan arama). Key yoksa DuckDuckGo'ya düşer.
+            </div>
           </div>
         </div>
 
         <div class="form-row">
           <label class="form-label">Model</label>
           <input type="text" class="form-input" id="model-input" placeholder="llama3.2, mistral, gemma3, qwen2.5...">
+          <label class="form-label" style="margin-top:8px;">Kayıtlı Modeller</label>
+          <select class="form-select" id="model-history">
+            <option value="">— Kayıtlı model seç —</option>
+          </select>
         </div>
 
         <button class="btn btn-secondary btn-sm" id="test-connection-btn" style="width:fit-content;">
@@ -336,6 +344,6 @@
 
   <script src="lib/purify.min.js"></script>
   <script src="lib/marked.min.js"></script>
-  <script src="sidepanel.js"></script>
+  <script type="module" src="sidepanel.js"></script>
 </body>
 </html>

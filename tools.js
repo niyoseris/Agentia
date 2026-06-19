@@ -48,7 +48,7 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'tab_get_active',
-      description: 'Get the currently active tab info (id, url, title)',
+      description: 'Get the current working tab managed by Agentia (id, url, title). This is the tab Agentia is operating on, not necessarily the tab the user is looking at.',
       parameters: { type: 'object', properties: {} }
     }
   },
@@ -103,11 +103,11 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'tab_screenshot',
-      description: 'Take a screenshot of the current tab. Returns image data for vision-capable models (llava, llama3.2-vision, etc.). Use this to visually inspect the page before interacting with elements.',
+      description: 'Take a screenshot of the current working tab managed by Agentia. Returns image data for vision-capable models (llava, llama3.2-vision, etc.). Use this to visually inspect the page before interacting with elements.',
       parameters: {
         type: 'object',
         properties: {
-          tabId: { type: 'number', description: 'Tab ID (default: active tab)' }
+          tabId: { type: 'number', description: 'Tab ID (default: Agentia focused tab)' }
         }
       }
     }
@@ -512,13 +512,13 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web using DuckDuckGo. Returns a list of search results with titles, URLs, and snippets. Use this instead of navigating to search engines manually.',
+      description: 'Search the web. Uses Ollama web search by default (requires an Ollama API key) and falls back to DuckDuckGo if Ollama is unavailable or returns no results. Returns a list of search results with titles, URLs, and snippets. Use this instead of navigating to search engines manually.',
       parameters: {
         type: 'object',
         required: ['query'],
         properties: {
           query: { type: 'string', description: 'Search query, e.g. "best restaurants in Istanbul" or "been.bio personal travel biography"' },
-          maxResults: { type: 'number', description: 'Maximum number of results to return (default: 8, max: 15)' }
+          maxResults: { type: 'number', description: 'Maximum number of results to return (default: 8, max: 15 for DuckDuckGo, 10 for Ollama)' }
         }
       }
     }
@@ -534,6 +534,128 @@ export const AGENT_TOOLS = [
         properties: {
           url: { type: 'string', description: 'Full URL of the image to download (http/https only)' }
         }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_detect',
+      description: 'Detect open modals, dialogs, overlays, and popups on the current page. Finds HTML <dialog> elements, Bootstrap modals, Material UI dialogs, cookie consent banners, and custom modal overlays. Returns a list with each dialog\'s type, title/message text, visible buttons, and input fields.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number', description: 'Tab ID (default: active tab)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_dismiss',
+      description: 'Close/cancel a visible dialog or modal. Clicks the Cancel/Close/X/No button, or calls dialog.close() for native HTML dialogs, or presses Escape. Use index from dialog_detect to target a specific dialog.',
+      parameters: {
+        type: 'object',
+        properties: {
+          index: { type: 'number', description: 'Dialog index from dialog_detect result (0 = first dialog). Default: 0.' },
+          selector: { type: 'string', description: 'CSS selector for a specific close/dismiss button (optional — auto-detected if omitted)' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_accept',
+      description: 'Accept/confirm a visible dialog or modal. Clicks the OK/Confirm/Yes/Submit/Accept button. For prompt-like dialogs, call dialog_fill first then dialog_accept. Use index from dialog_detect to target a specific dialog.',
+      parameters: {
+        type: 'object',
+        properties: {
+          index: { type: 'number', description: 'Dialog index from dialog_detect result (0 = first). Default: 0.' },
+          selector: { type: 'string', description: 'CSS selector for a specific accept button (optional — auto-detected if omitted)' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_fill',
+      description: 'Fill input fields inside a visible dialog/modal. Use this before dialog_accept for prompt-like dialogs or login forms in modals.',
+      parameters: {
+        type: 'object',
+        required: ['fields'],
+        properties: {
+          index: { type: 'number', description: 'Dialog index from dialog_detect result (0 = first). Default: 0.' },
+          fields: {
+            type: 'object',
+            description: 'Map of field label/name to value, e.g. {"email": "user@example.com", "password": "secret123"}'
+          },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_alert_intercept',
+      description: 'Enable alert/confirm/prompt interception on the page. Once activated, browser alert() dialogs are automatically suppressed (auto-accepted), confirm() returns true, and prompt() returns an empty string. The intercepted calls are recorded and can be retrieved. Use this BEFORE performing actions that might trigger unwanted browser dialogs. Call again with intercept:false to restore original behavior.',
+      parameters: {
+        type: 'object',
+        properties: {
+          intercept: { type: 'boolean', description: 'true = intercept and suppress dialogs, false = restore original behavior. Default: true.' },
+          autoConfirm: { type: 'boolean', description: 'Auto-accept confirm() dialogs. Default: true.' },
+          autoPrompt: { type: 'string', description: 'Value to auto-return for prompt() dialogs. Default: empty string.' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_get_intercepted',
+      description: 'Get the list of browser alert/confirm/prompt calls that were intercepted since dialog_alert_intercept was enabled. Returns the type (alert/confirm/prompt), message text, and what response was auto-given.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tabId: { type: 'number' },
+          clear: { type: 'boolean', description: 'Clear the buffer after reading. Default: true.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_upload',
+      description: 'Upload a file to a file input element on the page. The file content is fetched from a URL (the agent must provide a data URL or publicly accessible URL). Use this for forms that require file uploads.',
+      parameters: {
+        type: 'object',
+        required: ['selector', 'fileName'],
+        properties: {
+          selector: { type: 'string', description: 'CSS selector for the <input type="file"> element' },
+          fileName: { type: 'string', description: 'Name for the file, e.g. "resume.pdf" or "photo.jpg"' },
+          content: { type: 'string', description: 'File content as text (for text files) — use this OR url' },
+          url: { type: 'string', description: 'URL to fetch file content from (the system will download it)' },
+          mimeType: { type: 'string', description: 'MIME type, e.g. "image/png", "application/pdf". Auto-detected from fileName if omitted.' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'quick_report',
+      description: 'Generate and open an HTML report from the research collected so far, without stopping the running task. Use this when the user wants a snapshot before the research is fully complete.',
+      parameters: {
+        type: 'object',
+        properties: {}
       }
     }
   }
