@@ -13,7 +13,11 @@ const DEFAULT_SETTINGS = {
   maxIterations: 0,
   thinkingMode: 'off',
   visionEnabled: 'auto',   // 'auto' = detect, 'on' = force on, 'off' = force off
-  modelHistory: []
+  modelHistory: [],
+  embeddingModel: 'nomic-embed-text',
+  ragEnabled: true,
+  ragTopK: 5,
+  ragMaxChars: 4000
 };
 
 export function addModelToHistory(settings, model) {
@@ -28,7 +32,8 @@ export function addModelToHistory(settings, model) {
 
 export async function getSettings() {
   const data = await chrome.storage.local.get('agentia_settings');
-  return data.agentia_settings || DEFAULT_SETTINGS;
+  // Merge defaults so new setting keys exist for users with older stored settings
+  return { ...DEFAULT_SETTINGS, ...(data.agentia_settings || {}) };
 }
 
 export async function saveSettings(settings) {

@@ -7,36 +7,47 @@ import { MemoryStore } from './memory-store.js';
 import { handleTabAction } from './tab-handler.js';
 import { handleDomAction } from './dom-handler.js';
 import { handleWebSearch } from './search-handler.js';
-import { handlePdfRead } from './pdf-handler.js';
+import { handlePdfRead, extractPdfText } from './pdf-handler.js';
 import { handleImageSave } from './image-handler.js';
-import { startRecording, stopRecording, getActiveRecording, setActiveRecording, replayRecording } from './recording-handler.js';
+import { startRecording, stopRecording, getActiveRecording, setActiveRecording, replayRecording, replayEvents } from './recording-handler.js';
 import { getSettings, saveSettings } from './settings-handler.js';
 import { getTaskHistory, saveTaskHistory, deleteTaskHistory } from './ollama-handler.js';
 import { getActiveTabId } from './utils.js';
 import { fileStore } from './file-store.js';
+import { kbStore } from './kb-store.js';
+import { RagEngine } from './rag.js';
+import { personaStore } from './persona-store.js';
+import { skillStore } from './skill-store.js';
 
 const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
 let actionStore = null;
 let memoryStore = null;
+let ragEngine = null;
 let fileStoreReady = null;
 let initPromise = null;
 let currentTaskController = null;
 let activeTaskId = null;
 
 // ── MV3 Service Worker Keepalive ──────────────────────────────────────────────
+// Refcounted: tasks and KB ingestion can overlap; the alarm is cleared only
+// when the last consumer stops.
+let keepaliveRefs = 0;
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'agentia-keepalive') {
-    console.log('[Agentia] keepalive ping, task running:', !!currentTaskController);
+    console.log('[Agentia] keepalive ping, refs:', keepaliveRefs, 'task running:', !!currentTaskController);
   }
 });
 
 function startKeepalive() {
+  keepaliveRefs++;
   chrome.alarms.create('agentia-keepalive', { periodInMinutes: 0.4 });
 }
 
 function stopKeepalive() {
-  chrome.alarms.clear('agentia-keepalive');
+  keepaliveRefs = Math.max(0, keepaliveRefs - 1);
+  if (keepaliveRefs === 0) chrome.alarms.clear('agentia-keepalive');
 }
 
 // Initialize on startup
@@ -63,6 +74,14 @@ async function init() {
   await memoryStore.load();
   agentCore.memoryStore = memoryStore;
 
+  // Personas + skills
+  await personaStore.load();
+  await personaStore.ensureDefault();
+  await skillStore.load();
+  agentCore.personaStore = personaStore;
+  agentCore.skillStore = skillStore;
+  agentCore.setActivePersona(personaStore.getActive());
+
   // Open IndexedDB file store and migrate any files still in chrome.storage.local
   try {
     fileStoreReady = fileStore.open().then(async () => {
@@ -72,6 +91,29 @@ async function init() {
     await fileStoreReady;
   } catch (dbErr) {
     console.warn('[Agentia] IndexedDB file store init failed:', dbErr.message);
+  }
+
+  // Knowledge base store + RAG engine
+  try {
+    await kbStore.open();
+    ragEngine = new RagEngine(kbStore);
+    ragEngine.configure({
+      apiBase: agentCore.apiBase,
+      headers: agentCore._headers(),
+      embeddingModel: saved.embeddingModel,
+      enabled: saved.ragEnabled
+    });
+    agentCore.rag = ragEngine;
+    // Resume any embeddings interrupted by a service worker restart
+    startKeepalive();
+    ragEngine.resumePendingEmbeddings((p) => broadcastKbEvent('EMBED_PROGRESS', p))
+      .then((resumed) => {
+        if (resumed > 0) console.log('[Agentia] Resumed embeddings for', resumed, 'documents');
+      })
+      .catch((e) => console.warn('[Agentia] Embedding resume failed:', e.message))
+      .finally(() => stopKeepalive());
+  } catch (kbErr) {
+    console.warn('[Agentia] KB store init failed:', kbErr.message);
   }
 
   // Restore active recording state after service worker restart
@@ -392,6 +434,12 @@ async function handleMessage(message, sender, sendResponse) {
       case 'SAVE_SETTINGS': {
         await saveSettings(payload);
         agentCore.updateSettings(payload);
+        ragEngine?.configure({
+          apiBase: agentCore.apiBase,
+          headers: agentCore._headers(),
+          embeddingModel: payload.embeddingModel,
+          enabled: payload.ragEnabled
+        });
         sendResponse({ success: true });
         break;
       }
@@ -632,12 +680,250 @@ async function handleMessage(message, sender, sendResponse) {
         break;
       }
 
+      // ---- Knowledge Bases ----
+      case 'KB_LIST': {
+        const kbs = await kbStore.listKbs();
+        sendResponse({ success: true, data: kbs });
+        break;
+      }
+
+      case 'KB_CREATE': {
+        const kb = await kbStore.createKb({ name: payload.name, description: payload.description });
+        sendResponse({ success: true, data: kb });
+        break;
+      }
+
+      case 'KB_UPDATE': {
+        const kb = await kbStore.updateKb(payload.id, { name: payload.name, description: payload.description });
+        sendResponse({ success: true, data: kb });
+        break;
+      }
+
+      case 'KB_DELETE': {
+        await kbStore.deleteKb(payload.id);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'KB_LIST_DOCS': {
+        const docs = await kbStore.listDocs(payload.kbId);
+        sendResponse({ success: true, data: docs });
+        break;
+      }
+
+      case 'KB_DELETE_DOC': {
+        await kbStore.deleteDoc(payload.id);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'KB_ADD_DOC': {
+        // Respond immediately, ingest async (mirrors AGENT_RUN_TASK — avoids
+        // the message-channel timeout on long embed runs)
+        if (!ragEngine) throw new Error('RAG motoru hazır değil');
+        sendResponse({ success: true, data: { started: true } });
+        ingestDocAsync(payload, sender).catch((err) => {
+          console.error('[Agentia] KB ingest error:', err);
+          broadcastKbEvent('EMBED_ERROR', { kbId: payload.kbId, error: err.message });
+        });
+        break;
+      }
+
+      case 'KB_SEARCH': {
+        if (!ragEngine) throw new Error('RAG motoru hazır değil');
+        const results = await ragEngine.search(payload.query, payload.kbIds || null, { topK: payload.topK || 8 });
+        sendResponse({ success: true, data: results });
+        break;
+      }
+
+      case 'KB_REINDEX': {
+        if (!ragEngine) throw new Error('RAG motoru hazır değil');
+        sendResponse({ success: true, data: { started: true } });
+        startKeepalive();
+        ragEngine.reindexKb(payload.kbId, (p) => broadcastKbEvent('EMBED_PROGRESS', p))
+          .then(() => broadcastKbEvent('REINDEX_DONE', { kbId: payload.kbId }))
+          .catch((err) => broadcastKbEvent('EMBED_ERROR', { kbId: payload.kbId, error: err.message }))
+          .finally(() => stopKeepalive());
+        break;
+      }
+
+      // ---- Personas ----
+      case 'PERSONA_LIST': {
+        sendResponse({ success: true, data: { personas: personaStore.list(), activePersonaId: personaStore.data?.activePersonaId } });
+        break;
+      }
+
+      case 'PERSONA_GET_ACTIVE': {
+        sendResponse({ success: true, data: personaStore.getActive() });
+        break;
+      }
+
+      case 'PERSONA_SAVE': {
+        const persona = await personaStore.upsert(payload);
+        // Keep the runtime copy fresh when the active persona was edited
+        if (persona.id === personaStore.data?.activePersonaId) {
+          agentCore.setActivePersona(persona);
+        }
+        sendResponse({ success: true, data: persona });
+        break;
+      }
+
+      case 'PERSONA_DELETE': {
+        await personaStore.delete(payload.id);
+        agentCore.setActivePersona(personaStore.getActive());
+        sendResponse({ success: true, data: { activePersonaId: personaStore.data?.activePersonaId } });
+        break;
+      }
+
+      case 'PERSONA_SET_ACTIVE': {
+        const persona = await personaStore.setActive(payload.id);
+        agentCore.setActivePersona(persona);
+        sendResponse({ success: true, data: persona });
+        break;
+      }
+
+      // ---- Skills ----
+      case 'SKILL_LIST': {
+        sendResponse({ success: true, data: skillStore.list() });
+        break;
+      }
+
+      case 'SKILL_GET': {
+        const skill = payload.id ? skillStore.get(payload.id) : skillStore.getByName(payload.name);
+        if (!skill) {
+          const available = skillStore.list().map(s => s.name).join(', ') || '(hiç skill yok)';
+          sendResponse({ success: false, error: `Skill bulunamadı: "${payload.name || payload.id}". Mevcut: ${available}` });
+          break;
+        }
+        sendResponse({ success: true, data: skill });
+        break;
+      }
+
+      case 'SKILL_SAVE': {
+        const skill = await skillStore.upsert(payload);
+        sendResponse({ success: true, data: skill });
+        break;
+      }
+
+      case 'SKILL_DELETE': {
+        await skillStore.delete(payload.id);
+        sendResponse({ success: true });
+        break;
+      }
+
+      case 'SKILL_SET_ENABLED': {
+        const skill = await skillStore.setEnabled(payload.id, payload.enabled);
+        sendResponse({ success: true, data: skill });
+        break;
+      }
+
+      case 'SKILL_FROM_RECORDING': {
+        const recording = actionStore.getRecording(payload.recordingId);
+        if (!recording) throw new Error('Kayıt bulunamadı');
+        const skill = await skillStore.fromRecording(recording, { name: payload.name, description: payload.description });
+        sendResponse({ success: true, data: skill });
+        break;
+      }
+
+      case 'SKILL_RUN_MACRO': {
+        const skill = payload.id ? skillStore.get(payload.id) : skillStore.getByName(payload.name);
+        if (!skill) throw new Error(`Skill bulunamadı: "${payload.name || payload.id}"`);
+        if (skill.type !== 'macro' || !skill.steps?.length) {
+          throw new Error(`"${skill.name}" bir makro skill değil — skill_use ile talimatlarını yükleyin`);
+        }
+        const macroTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        const events = skill.steps.map(s => ({
+          type: s.action,
+          selector: s.selector || undefined,
+          value: s.value || undefined,
+          url: s.action === 'navigate' ? s.value : undefined,
+          key: s.action === 'keypress' ? s.value : undefined
+        }));
+        let macroResult;
+        if (payload.adaptive) {
+          macroResult = await agentCore.adaptiveReplay({ name: skill.name, events }, macroTabId);
+        } else {
+          macroResult = await replayEvents(events, macroTabId);
+        }
+        const resultList = macroResult.results || [];
+        sendResponse({
+          success: true,
+          data: {
+            succeeded: resultList.filter(r => r.success).length,
+            failed: resultList.filter(r => !r.success).length,
+            total: resultList.length
+          }
+        });
+        break;
+      }
+
       default:
         sendResponse({ success: false, error: 'Unknown message type' });
     }
   } catch (err) {
     console.error('[Agentia] Error:', type, err);
     sendResponse({ success: false, error: err.message });
+  }
+}
+
+// ---- Knowledge Base ingestion ----
+function broadcastKbEvent(eventType, data) {
+  chrome.runtime.sendMessage({ type: 'KB_EVENT', data: { type: eventType, ...data } })
+    .catch((e) => { console.warn('[Agentia] KB event notification failed:', e.message); });
+}
+
+// Ingest a document into a KB. payload:
+// { kbId, name, sourceType: 'text'|'file'|'pdf'|'page', content?, contentBase64?, url?, tabId? }
+async function ingestDocAsync(payload, sender) {
+  const { kbId, sourceType } = payload;
+  let name = payload.name || '';
+  let text = payload.content || '';
+  let pageTexts = null;
+  let sourceUrl = payload.url || '';
+
+  startKeepalive();
+  try {
+    if (sourceType === 'pdf') {
+      let pdfResult;
+      if (payload.contentBase64) {
+        const binary = atob(payload.contentBase64);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        pdfResult = await extractPdfText({ data: bytes, pages: 'all-full' });
+      } else if (payload.url) {
+        pdfResult = await extractPdfText({ url: payload.url, pages: 'all-full' });
+      } else {
+        throw new Error('PDF için url veya contentBase64 gerekli');
+      }
+      pageTexts = pdfResult.pages;
+      if (!name) name = sourceUrl ? decodeURIComponent(sourceUrl.split('/').pop().split('?')[0]) : 'PDF dokümanı';
+    } else if (sourceType === 'page') {
+      const tabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+      if (!tabId) throw new Error('Sayfa kaydetmek için aktif tab bulunamadı');
+      const result = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => ({
+          url: location.href,
+          title: document.title,
+          text: document.body.innerText.substring(0, 1500000)
+        })
+      });
+      const pageData = result[0].result;
+      text = pageData.text;
+      sourceUrl = pageData.url;
+      if (!name) name = pageData.title || pageData.url;
+    }
+    // 'text' and 'file': content arrives directly in payload.content
+
+    if (!text && !pageTexts) throw new Error('İçerik boş — doküman eklenemedi');
+
+    const doc = await ragEngine.ingestDocument(
+      { kbId, name: name || 'Adsız doküman', sourceType, sourceUrl, text, pageTexts },
+      (p) => broadcastKbEvent('EMBED_PROGRESS', { kbId, ...p })
+    );
+    broadcastKbEvent('EMBED_DONE', { kbId, docId: doc.id, embedStatus: doc.embedStatus, chunkCount: doc.chunkCount });
+  } finally {
+    stopKeepalive();
   }
 }
 

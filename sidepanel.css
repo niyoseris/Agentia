@@ -800,3 +800,79 @@ body {
   opacity: 0.7; transition: opacity 0.2s; border-radius: 4px;
 }
 .theme-toggle:hover { opacity: 1; }
+
+/* ---- Persona Switcher (header) ---- */
+.persona-switcher {
+  max-width: 110px;
+  font-size: 11px;
+  padding: 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg2);
+  color: var(--text);
+  cursor: pointer;
+}
+.persona-switcher:focus { border-color: var(--accent); outline: none; }
+
+/* ---- Studio (Profil) Tab ---- */
+.studio-subnav {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.studio-nav-btn {
+  flex: 1;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 4px;
+  font-size: 11px;
+  color: var(--text2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.studio-nav-btn:hover { background: var(--bg3); }
+.studio-nav-btn.active {
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.studio-panel { display: none; }
+.studio-panel.active { display: block; }
+
+.studio-card {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: var(--bg3);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.studio-card.active-persona { border-color: var(--accent); }
+.studio-card-title { font-weight: 600; color: var(--text); }
+.studio-card-desc { font-size: 11px; color: var(--text3); margin-top: 2px; }
+.studio-card-actions { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
+.studio-card-actions button {
+  font-size: 11px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  color: var(--accent);
+}
+.studio-card-actions button.danger { color: var(--red); }
+
+.kb-status-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  color: var(--text3);
+  margin-left: 4px;
+}
+.kb-status-badge.done { color: var(--green); border-color: var(--green); }
+.kb-status-badge.partial, .kb-status-badge.pending { color: var(--accent2); border-color: var(--accent2); }
+.kb-status-badge.keyword { color: var(--text3); }

@@ -236,6 +236,50 @@ Agentia, Ollama ile çalışan ajan tabanlı bir Chrome MV3 tarayıcı asistanı
 
 ---
 
+## AŞAMA 9: RAG + Bilgi Tabanları + Kişilikler + Yetenekler (Tamamlandı)
+
+### 9.1 Bilgi Tabanları (Knowledge Base) + RAG
+- **Yeni dosyalar:** `kb-store.js` (IndexedDB `agentia_kb`: kbs/docs/chunks), `rag.js` (chunking, embedding, hibrit arama)
+- İçerik kaynakları: metin yapıştırma, .txt/.md/.pdf yükleme (PDF base64 → pdf.js), "Bu Sayfayı Kaydet" (`document.body.innerText`)
+- Chunking: ~1200 kr hedef, 200 kr cümle-hizalı overlap, markdown başlık sınırları; PDF sayfaları `meta.page` ile
+- Embedding: Ollama `/api/embed`, 16'lık batch, chunk başına anında persist (SW restart dayanıklılığı)
+- Hibrit arama: embedding modeli varsa cosine; yoksa/erişilemezse BM25-lite keyword fallback (60s hata cache)
+- `resumePendingEmbeddings()` init'te yarım kalan indekslemeyi sürdürür; `KB_REINDEX` model değişiminde yeniden indeksler
+- RAG enjeksiyonu: aktif personanın bağlı KB'lerinden top-k parça system prompta (`[KB_CONTEXT_INJECTED_HERE]`), kaynak atıflı, 4000 kr bütçe
+- Yeni tool: `kb_search(query, topK)` — ajan isteğe bağlı derin arama yapar
+- KB bağlamı varken `num_ctx ≥ 16384` (Ollama'nın 4096 sessiz kesmesine karşı)
+
+### 9.2 Kişilikler (Personalar)
+- **Yeni dosya:** `persona-store.js` (chrome.storage.local `agentia_personas`)
+- Persona = kişilik promptu + bağlı KB'ler + bağlı yetenekler + model/sıcaklık override
+- `effectiveModel`/`effectiveTemperature` getter'ları tüm API çağrılarında kullanılıyor
+- Header'da hızlı geçiş dropdown'u; silinemez `default` (Agentia) personası; aktif silinirse default'a düşer
+- `PERSONA_LIST/SAVE/DELETE/SET_ACTIVE/GET_ACTIVE` mesajları
+
+### 9.3 Yetenekler (Skills)
+- **Yeni dosya:** `skill-store.js` (chrome.storage.local `agentia_skills`)
+- İki tip: `prompt` (talimat paketi) ve `macro` (aksiyon dizisi)
+- Progressive disclosure: system prompta sadece ad+açıklama listesi; `skill_use(name)` tam talimatı yükler
+- `skill_run_macro(name)` makro adımlarını `replayEvents` (yeni export, recording-handler) ile oynatır; adaptive destekli
+- Kayıtlardan içe aktarma: `SKILL_FROM_RECORDING`
+- `SKILL_LIST/GET/SAVE/DELETE/SET_ENABLED/FROM_RECORDING/RUN_MACRO` mesajları
+
+### 9.4 UI: 🧩 Profil tabı
+- Tek yeni tab, içinde alt-nav: Kişilikler | Bilgi Tabanları | Yetenekler
+- KB drill-down: doküman listesi, embed durum rozetleri (KB_EVENT ile canlı progress), arama test kutusu
+- Settings'e "Bilgi Tabanı (RAG)" bölümü: embedding modeli, RAG toggle, top-K
+- Ctrl+1-7 tab kısayolları
+
+### 9.5 Altyapı düzeltmeleri
+- **Bug fix:** `runTask` system prompta `this.systemPrompt`'u iki kez ekliyordu (agent-core.js:383)
+- `getSettings()` artık default'ları merge ediyor (yeni ayar anahtarları eski kullanıcılarda undefined kalmaz)
+- `buildSystemPrompt` imzası options objesine geçti; `_withSystem` async oldu
+- Keepalive refcount'lu (görev + KB ingest çakışması)
+- `extractPdfText({url?, data?, pages?})` export'u; `pages: 'all-full'` tüm sayfaları okur (10 sayfa cap'siz)
+- `KB_ADD_DOC` hemen `{started:true}` döner, progress `KB_EVENT` broadcast'iyle akar (mesaj kanalı timeout önlenir)
+
+---
+
 ## Bilinen Sorunlar / Gelecek İyileştirmeler
 - `_buildFinalHtml` araştırma verisinden HTML üretiyor, ama kalitesi LLM'in ürettiği kadar iyi değil
 - Facebook gibi obfuscated DOM'lu sitelerde scraping hâlâ zor

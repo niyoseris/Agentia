@@ -270,7 +270,8 @@ export class MemoryStore {
 }
 
 // ---- Keyword extraction for relevance matching ----
-function extractKeywords(text) {
+// Exported for reuse by rag.js keyword-fallback scoring
+export function extractKeywords(text) {
   if (!text) return [];
   const stopWords = new Set([
     'a', 'an', 'the', 'is', 'are', 'was', 'were', 'be', 'been', 'being',

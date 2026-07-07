@@ -16,6 +16,14 @@ export class AgentCore {
     this.thinkingMode = 'off'; // 'off', 'low', 'medium', 'high'
     this.visionEnabled = 'auto'; // 'auto', 'on', 'off'
     this.memoryStore = null; // Set by background.js after init
+    this.rag = null;          // RagEngine, set by background.js after init
+    this.personaStore = null; // Set by background.js after init
+    this.skillStore = null;   // Set by background.js after init
+    this.activePersona = null;
+    this.ragEnabled = true;
+    this.ragTopK = 5;
+    this.ragMaxChars = 4000;
+    this._kbContextActive = false; // Raises num_ctx when KB context was injected
     this._visionCache = null; // Cache for model vision capability check
 
     // Runtime task state exposed for quick-report and UI introspection
@@ -47,6 +55,42 @@ export class AgentCore {
     return context ? '\n\n## Your Memories (from past sessions)\n' + context : '';
   }
 
+  // Assemble the complete system prompt: base + persona + skills + KB context + memory
+  async _buildFullSystemPrompt(userText) {
+    const persona = this.activePersona;
+    const personaPrompt = (persona?.personalityPrompt || '').substring(0, 2000);
+
+    // Skills: one line per effective skill (progressive disclosure — full
+    // instructions load on demand via skill_use)
+    let skillsSection = '';
+    if (this.skillStore) {
+      const skills = this.skillStore.effectiveSkills(persona).slice(0, 20);
+      skillsSection = skills
+        .map(s => `- ${s.name} [${s.type}]: ${(s.description || '').substring(0, 150)}`)
+        .join('\n');
+    }
+
+    // KB context: retrieve top-k chunks from the persona's linked KBs
+    let kbContext = '';
+    this._kbContextActive = false;
+    if (this.rag && this.ragEnabled && persona?.kbIds?.length > 0 && userText) {
+      try {
+        kbContext = await this.rag.buildContext(userText, persona.kbIds, this.ragMaxChars, this.ragTopK);
+        this._kbContextActive = kbContext.length > 0;
+      } catch (err) {
+        console.warn('[Agentia] KB context build failed:', err.message);
+      }
+    }
+
+    return buildSystemPrompt(AGENT_SYSTEM_PROMPT_BASE, {
+      customPrompt: this.systemPrompt,
+      memoryContext: this._buildMemoryPrompt(userText),
+      personaPrompt,
+      skillsSection,
+      kbContext
+    });
+  }
+
   updateSettings(settings) {
     if (settings.ollamaUrl) this.localBase = settings.ollamaUrl;
     if (settings.cloudBase) this.cloudBase = settings.cloudBase;
@@ -62,11 +106,29 @@ export class AgentCore {
       this.visionEnabled = settings.visionEnabled;
       this._visionCache = null; // Reset cache when setting changes
     }
+    if (settings.ragEnabled !== undefined) this.ragEnabled = settings.ragEnabled;
+    if (settings.ragTopK !== undefined && settings.ragTopK !== null) this.ragTopK = settings.ragTopK;
+    if (settings.ragMaxChars !== undefined && settings.ragMaxChars !== null) this.ragMaxChars = settings.ragMaxChars;
   }
 
   // Resolved API base (local or cloud)
   get apiBase() {
     return this.useCloud ? this.cloudBase : this.localBase;
+  }
+
+  // Active persona overrides
+  get effectiveModel() {
+    return this.activePersona?.modelOverride || this.model;
+  }
+
+  get effectiveTemperature() {
+    const t = this.activePersona?.temperatureOverride;
+    return (t !== null && t !== undefined && t !== '') ? t : this.temperature;
+  }
+
+  setActivePersona(persona) {
+    this.activePersona = persona || null;
+    this._visionCache = null; // Model may change with the persona
   }
 
   // Build fetch headers — adds auth only for cloud
@@ -92,7 +154,7 @@ export class AgentCore {
       const res = await fetch(`${this.apiBase}/api/show`, {
         method: 'POST',
         headers: this._headers(),
-        body: JSON.stringify({ name: this.model })
+        body: JSON.stringify({ name: this.effectiveModel })
       });
       if (res.ok) {
         const data = await res.json();
@@ -114,7 +176,7 @@ export class AgentCore {
 
   // Synchronous heuristic check — used when API check isn't available yet
   _isVisionByModelName() {
-    const name = this.model.toLowerCase();
+    const name = this.effectiveModel.toLowerCase();
     const visionFamilies = ['llava', 'bakllava', 'pixtral', 'minicpm-v', 'internvl', 'cogvlm', 'moondream'];
     const visionModels = [
       'llama4', 'llama-4',
@@ -194,7 +256,7 @@ export class AgentCore {
   // Build Ollama API options including thinking/reasoning settings
   _buildOptions(extraOpts = {}) {
     const opts = {
-      temperature: extraOpts.temperature ?? this.temperature,
+      temperature: extraOpts.temperature ?? this.effectiveTemperature,
       num_predict: extraOpts.num_predict ?? this.maxTokens
     };
 
@@ -208,6 +270,12 @@ export class AgentCore {
     } else {
       // Explicitly disable thinking — some reasoning models think by default
       opts.think = false;
+    }
+
+    // KB context injected: the system prompt grows several thousand tokens —
+    // Ollama's default 4096 window would silently truncate it
+    if (this._kbContextActive) {
+      opts.num_ctx = Math.max(opts.num_ctx || 0, 16384);
     }
 
     return opts;
@@ -285,40 +353,40 @@ export class AgentCore {
 
   // ---- Plain Chat (no tools) ----
   async chat(messages, tabId) {
-    const allMessages = this._withSystem(messages);
+    const allMessages = await this._withSystem(messages);
 
     const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
-        model: this.model,
+        model: this.effectiveModel,
         messages: allMessages,
         stream: false,
         options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
     const data = await res.json();
     return data.message?.content || '';
   }
 
   // ---- Streaming Chat (no tools) ----
   async streamChat(messages, tabId, onChunk) {
-    const allMessages = this._withSystem(messages);
+    const allMessages = await this._withSystem(messages);
 
     const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
-        model: this.model,
+        model: this.effectiveModel,
         messages: allMessages,
         stream: true,
         options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -364,23 +432,19 @@ export class AgentCore {
     this.agentTabIds = new Set();
     this.focusedTabId = tabId || null;
 
-    console.log(`[Agentia] Starting task with model=${this.model} base=${this.apiBase} cloud=${this.useCloud}`);
+    console.log(`[Agentia] Starting task with model=${this.effectiveModel} base=${this.apiBase} cloud=${this.useCloud}`);
 
     let messages;
 
-    // Inject current date/time into system prompt
-    const systemPrompt = buildSystemPrompt(
-      AGENT_SYSTEM_PROMPT_BASE,
-      this.systemPrompt,
-      this._buildMemoryPrompt(taskDescription)
-    );
+    // Full system prompt: persona + skills + KB context + memory + date/time
+    const systemPrompt = await this._buildFullSystemPrompt(taskDescription);
 
     if (existingMessages && existingMessages.length > 0) {
       // Continue existing session — append new user turn
       messages = [...existingMessages, { role: 'user', content: taskDescription }];
     } else {
       messages = [
-        { role: 'system', content: systemPrompt + (this.systemPrompt ? '\n\n' + this.systemPrompt : '') },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: taskDescription }
       ];
     }
@@ -530,7 +594,7 @@ export class AgentCore {
           method: 'POST',
           headers: this._headers(),
           body: JSON.stringify({
-            model: this.model,
+            model: this.effectiveModel,
             messages: visionMessages,
             tools: AGENT_TOOLS,
             stream: false,
@@ -538,7 +602,7 @@ export class AgentCore {
           })
         }, 3, signal);
 
-        if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+        if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
         data = await res.json();
         assistantMsg = data.message;
       } catch (err) {
@@ -603,7 +667,7 @@ export class AgentCore {
               method: 'POST',
               headers: this._headers(),
               body: JSON.stringify({
-                model: this.model, messages, tools: AGENT_TOOLS, stream: false,
+                model: this.effectiveModel, messages, tools: AGENT_TOOLS, stream: false,
                 options: this._buildOptions({ temperature: 0.2, num_predict: this.maxTokens })
               })
             }, 3, signal);
@@ -730,7 +794,7 @@ export class AgentCore {
         'tab_get_active', 'tab_get_all', 'tab_screenshot',
         'dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all',
         'dom_get_summary', 'dom_extract', 'page_get_info', 'pdf_read',
-        'memory_recall', 'web_search',
+        'memory_recall', 'web_search', 'kb_search', 'skill_use',
         'dialog_detect', 'dialog_get_intercepted'
       ]);
 
@@ -925,7 +989,7 @@ export class AgentCore {
         method: 'POST',
         headers: this._headers(),
         body: JSON.stringify({
-          model: this.model,
+          model: this.effectiveModel,
           messages: [
             {
               role: 'system',
@@ -1091,6 +1155,23 @@ export class AgentCore {
       case 'memory_save_recipe':
         return this._bgMsg('MEMORY_SAVE_RECIPE', { site: args.site, task: args.task, steps: args.steps });
 
+      case 'kb_search':
+        return this._bgMsg('KB_SEARCH', {
+          query: args.query,
+          kbIds: args.kbIds || this.activePersona?.kbIds || null,
+          topK: args.topK || 8
+        });
+
+      case 'skill_use':
+        return this._bgMsg('SKILL_GET', { name: args.name });
+
+      case 'skill_run_macro':
+        return this._bgMsg('SKILL_RUN_MACRO', {
+          name: args.name,
+          tabId: effectiveTabId,
+          adaptive: args.adaptive !== false
+        });
+
       case 'image_save':
         return this._bgMsg('IMAGE_SAVE', { url: args.url });
 
@@ -1121,7 +1202,7 @@ export class AgentCore {
         return this._bgMsg('FILE_UPLOAD', { selector: args.selector, fileName: args.fileName, content: args.content, url: args.url, mimeType: args.mimeType, tabId: effectiveTabId });
 
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, file_upload, quick_report.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, skill_use, skill_run_macro, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, file_upload, quick_report.`);
     }
   }
 
@@ -1210,6 +1291,35 @@ export class AgentCore {
     // memory_save_recipe: just confirm
     if (tool === 'memory_save_recipe') {
       return { saved: true, site: result?.site, task: result?.task };
+    }
+
+    // kb_search: cap chunk and total sizes
+    if (tool === 'kb_search' && Array.isArray(result)) {
+      const out = [];
+      let total = 0;
+      for (const r of result) {
+        const text = (r.text || '').substring(0, 1200);
+        if (total + text.length > 6000) break;
+        total += text.length;
+        out.push({ text, score: r.score, source: `${r.kbName}/${r.docName}${r.page ? ` (page ${r.page})` : ''}`, method: r.method });
+      }
+      return out.length > 0 ? out : { results: [], note: 'No relevant knowledge base content found' };
+    }
+
+    // skill_use: full instructions, capped
+    if (tool === 'skill_use') {
+      if (!result) return { error: 'Skill not found' };
+      const out = { name: result.name, type: result.type, instructions: (result.instructions || '').substring(0, 4000) };
+      if (result.type === 'macro' && Array.isArray(result.steps)) {
+        out.steps = result.steps.slice(0, 30);
+        out.note = 'Call skill_run_macro(name) to execute these steps automatically.';
+      }
+      return out;
+    }
+
+    // skill_run_macro: summary only
+    if (tool === 'skill_run_macro') {
+      return { ran: true, succeeded: result?.succeeded, failed: result?.failed, total: result?.total };
     }
 
     // dom_query_all: limit elements and truncate text
@@ -1307,13 +1417,9 @@ export class AgentCore {
     chrome.runtime.sendMessage({ type: 'AGENT_EVENT', data }).catch((e) => { console.warn('[Agentia] Event notification failed:', e.message); });
   }
 
-  _withSystem(messages) {
+  async _withSystem(messages) {
     const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-    const fullSystem = buildSystemPrompt(
-      AGENT_SYSTEM_PROMPT_BASE,
-      this.systemPrompt,
-      this._buildMemoryPrompt(lastUserMsg)
-    );
+    const fullSystem = await this._buildFullSystemPrompt(lastUserMsg);
     return [{ role: 'system', content: fullSystem }, ...messages];
   }
 

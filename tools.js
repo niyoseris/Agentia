@@ -658,5 +658,49 @@ export const AGENT_TOOLS = [
         properties: {}
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_search',
+      description: 'Search the user\'s knowledge bases (uploaded documents, saved pages, notes) for relevant information. Use this when the task may relate to the user\'s own documents, or when the injected Knowledge Base Context is insufficient. Returns text excerpts with source attribution and relevance scores.',
+      parameters: {
+        type: 'object',
+        required: ['query'],
+        properties: {
+          query: { type: 'string', description: 'What to search for, e.g. "return policy", "project deadlines"' },
+          topK: { type: 'number', description: 'Maximum number of excerpts to return (default: 8)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skill_use',
+      description: 'Load the full instructions of a skill listed in the Available Skills section. Call this FIRST when a listed skill matches the current task, then follow the returned instructions.',
+      parameters: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', description: 'Exact skill name from the Available Skills list' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skill_run_macro',
+      description: 'Execute a macro skill — a recorded sequence of browser actions (clicks, typing, navigation). Only works for skills marked [macro] in the Available Skills list.',
+      parameters: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', description: 'Exact macro skill name from the Available Skills list' },
+          adaptive: { type: 'boolean', description: 'Use adaptive replay that recovers from changed selectors (default: true)' }
+        }
+      }
+    }
   }
 ];

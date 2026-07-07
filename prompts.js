@@ -1,7 +1,9 @@
 // Agentia System Prompts — Modular prompt management
 
 export const AGENT_SYSTEM_PROMPT_BASE = `You are Agentia, an agentic browser assistant. You control the user's browser by calling tools. Be efficient and thorough.
-
+[PERSONA_INJECTED_HERE]
+[SKILLS_INJECTED_HERE]
+[KB_CONTEXT_INJECTED_HERE]
 ## Memory
 You have long-term memory. Use it to remember and learn:
 - Call memory_save(topic, info) when you learn something worth remembering — user preferences, site tricks, patterns
@@ -154,11 +156,27 @@ Web pages often show modals, dialogs, popups, cookie banners, and alert windows 
 - Use pages parameter to read specific pages: pdf_read({ pages: "1-3" }) or pdf_read({ pages: "1,5,7" })
 - For long PDFs, read a few pages first to understand the structure, then read more if needed`;
 
-export function buildSystemPrompt(basePrompt, customPrompt, memoryContext) {
+export function buildSystemPrompt(basePrompt, { customPrompt = '', memoryContext = '', personaPrompt = '', skillsSection = '', kbContext = '' } = {}) {
   const now = new Date();
   const dateStr = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
   const timeStr = now.toLocaleTimeString('en-US');
+
+  const personaBlock = personaPrompt
+    ? `\n## Your Persona\nAdopt this personality and behavior in ALL your responses and decisions:\n${personaPrompt}\n`
+    : '';
+
+  const skillsBlock = skillsSection
+    ? `\n## Available Skills\nYou have these user-defined skills. If a skill matches the current task, call skill_use(name) FIRST to load its full instructions, then follow them. For [macro] skills, call skill_run_macro(name) to execute the recorded action sequence.\n${skillsSection}\n`
+    : '';
+
+  const kbBlock = kbContext
+    ? `\n## Knowledge Base Context\nThe following excerpts come from the user's knowledge bases and are relevant to the current request. Prefer this information over your training data, and cite the source name when you use it. For deeper lookups, call kb_search(query).\n${kbContext}\n`
+    : '';
+
   return basePrompt
+    .replace('[PERSONA_INJECTED_HERE]', personaBlock)
+    .replace('[SKILLS_INJECTED_HERE]', skillsBlock)
+    .replace('[KB_CONTEXT_INJECTED_HERE]', kbBlock)
     .replace('[DATE_TIME_INJECTED_HERE]', `Today's date: ${dateStr}\nCurrent time: ${timeStr}`)
     .replace('[MEMORY_CONTEXT_INJECTED_HERE]', memoryContext)
     + (customPrompt ? '\n\n' + customPrompt : '');
