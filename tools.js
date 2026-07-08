@@ -415,8 +415,8 @@ export const AGENT_TOOLS = [
           content: { type: 'string', description: 'Initial HTML/text content — can be a skeleton that you will fill in with file_update calls' },
           type: {
             type: 'string',
-            enum: ['html', 'markdown', 'json', 'text'],
-            description: 'Use html for rich visual pages with images and styling'
+            enum: ['html', 'tool', 'markdown', 'json', 'text'],
+            description: 'html = rich visual page/report. tool = interactive page that can make network requests via agentiaHttp() (scanners, API clients). markdown/json/text for plain content.'
           }
         }
       }
@@ -460,8 +460,9 @@ export const AGENT_TOOLS = [
         type: 'object',
         required: ['topic', 'info'],
         properties: {
-          topic: { type: 'string', description: 'Category or topic, e.g. "Twitter posting", "user language preference", "Amazon product search"' },
-          info: { type: 'string', description: 'The information to remember, e.g. "User prefers Turkish language responses", "Twitter login uses contenteditable"' }
+          topic: { type: 'string', description: 'Short title of the fact, e.g. "Twitter posting", "user language preference", "Amazon product search"' },
+          info: { type: 'string', description: 'The information to remember, e.g. "User prefers Turkish language responses", "Twitter login uses contenteditable"' },
+          category: { type: 'string', description: 'Optional category to group the fact, e.g. "teknik", "site-kullanımı", "kullanıcı-tercihi", "araştırma-bulgusu", "genel"' }
         }
       }
     }
@@ -519,6 +520,24 @@ export const AGENT_TOOLS = [
         properties: {
           query: { type: 'string', description: 'Search query, e.g. "best restaurants in Istanbul" or "been.bio personal travel biography"' },
           maxResults: { type: 'number', description: 'Maximum number of results to return (default: 8, max: 15 for DuckDuckGo, 10 for Ollama)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'http_request',
+      description: 'Make a raw HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD) and get the status, headers, and body back. Runs from the extension so there are NO CORS restrictions — you can call APIs, submit forms, fetch JSON/HTML, probe endpoints, or build a scanner. GET is for reading/research; POST/PUT/DELETE change state — use them deliberately. The response body is capped (~1MB read, truncated for you). For authorized security testing follow the active-testing policy.',
+      parameters: {
+        type: 'object',
+        required: ['url'],
+        properties: {
+          url: { type: 'string', description: 'Full http(s) URL, e.g. "https://api.example.com/v1/users" or "http://localhost:3000/health"' },
+          method: { type: 'string', description: 'HTTP method (default GET)', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] },
+          headers: { type: 'object', description: 'Request headers as an object, e.g. {"Authorization": "Bearer x", "Content-Type": "application/json"}' },
+          body: { type: 'string', description: 'Request body for POST/PUT/PATCH (send JSON as a stringified string, and set Content-Type accordingly)' },
+          timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 30000, max 60000)' }
         }
       }
     }
@@ -651,11 +670,149 @@ export const AGENT_TOOLS = [
   {
     type: 'function',
     function: {
+      name: 'local_file_list',
+      description: 'List the local files/folders the user has authorized (via the Files panel), or list the contents of an authorized folder. Requires the Agentia side panel to be open. Call with no handleId to see all authorized items.',
+      parameters: {
+        type: 'object',
+        properties: {
+          handleId: { type: 'string', description: 'Optional id of an authorized folder to list its entries. Omit to list all authorized items.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_file_read',
+      description: 'Read the text content of a local file the user authorized. Requires the side panel open. For an authorized folder, pass the relative path.',
+      parameters: {
+        type: 'object',
+        required: ['handleId'],
+        properties: {
+          handleId: { type: 'string', description: 'Id of the authorized file, or of the folder containing it' },
+          path: { type: 'string', description: 'Relative path inside an authorized folder, e.g. "src/index.js" (only for folder handles)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_file_write',
+      description: 'Write text content to a local file the user authorized (overwrites). Requires the side panel open. For an authorized folder, pass the relative path (created if missing).',
+      parameters: {
+        type: 'object',
+        required: ['handleId', 'content'],
+        properties: {
+          handleId: { type: 'string', description: 'Id of the authorized file, or of the folder to write into' },
+          path: { type: 'string', description: 'Relative path inside an authorized folder (only for folder handles)' },
+          content: { type: 'string', description: 'Text content to write' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_add_document',
+      description: 'Add a document to a knowledge base from researched/collected text. Use this after gathering information the user wants stored in RAG. The document is chunked and embedded automatically.',
+      parameters: {
+        type: 'object',
+        required: ['kbId', 'name', 'text'],
+        properties: {
+          kbId: { type: 'string', description: 'Target knowledge base id' },
+          name: { type: 'string', description: 'A descriptive document title' },
+          text: { type: 'string', description: 'The full text content to store' },
+          sourceUrl: { type: 'string', description: 'Optional source URL for attribution' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_suppress_beforeunload',
+      description: 'Suppress the browser\'s "Are you sure you want to leave this page?" prompt so navigation/automation is not blocked. Call with suppress:true before actions that might trigger it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          suppress: { type: 'boolean', description: 'true to suppress (default), false to restore' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_download',
+      description: 'Save a file to the user\'s computer (Downloads folder). Use this when the user asks to save/export content to disk — text, JSON, CSV, HTML, or a file from a URL. Provide either text content, a data URL, or a source URL.',
+      parameters: {
+        type: 'object',
+        required: ['fileName'],
+        properties: {
+          fileName: { type: 'string', description: 'File name with extension, e.g. "rapor.md", "veri.csv", "sayfa.html"' },
+          content: { type: 'string', description: 'Text content to save (use this OR dataUrl OR url)' },
+          dataUrl: { type: 'string', description: 'A data: URL to save (for binary content)' },
+          url: { type: 'string', description: 'A remote URL whose file should be downloaded' },
+          mimeType: { type: 'string', description: 'MIME type for text content, e.g. "text/markdown", "application/json". Defaults to text/plain.' },
+          saveAs: { type: 'boolean', description: 'If true, show the OS "Save As" dialog letting the user pick the location (default false = save directly to Downloads)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'quick_report',
       description: 'Generate and open an HTML report from the research collected so far, without stopping the running task. Use this when the user wants a snapshot before the research is fully complete.',
       parameters: {
         type: 'object',
         properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_search',
+      description: 'Search the user\'s knowledge bases (uploaded documents, saved pages, notes) for relevant information. Use this when the task may relate to the user\'s own documents, or when the injected Knowledge Base Context is insufficient. Returns text excerpts with source attribution and relevance scores.',
+      parameters: {
+        type: 'object',
+        required: ['query'],
+        properties: {
+          query: { type: 'string', description: 'What to search for, e.g. "return policy", "project deadlines"' },
+          topK: { type: 'number', description: 'Maximum number of excerpts to return (default: 8)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skill_use',
+      description: 'Load the full instructions of a skill listed in the Available Skills section. Call this FIRST when a listed skill matches the current task, then follow the returned instructions.',
+      parameters: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', description: 'Exact skill name from the Available Skills list' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skill_run_macro',
+      description: 'Execute a macro skill — a recorded sequence of browser actions (clicks, typing, navigation). Only works for skills marked [macro] in the Available Skills list.',
+      parameters: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name: { type: 'string', description: 'Exact macro skill name from the Available Skills list' },
+          adaptive: { type: 'boolean', description: 'Use adaptive replay that recovers from changed selectors (default: true)' }
+        }
       }
     }
   }

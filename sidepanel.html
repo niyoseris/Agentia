@@ -12,6 +12,7 @@
   <div class="header">
     <div class="logo">A</div>
     <span class="header-title">Agentia</span>
+    <select id="persona-switcher" class="persona-switcher" title="Aktif kişilik"></select>
     <span class="model-badge" id="model-badge">—</span>
     <button class="theme-toggle" id="theme-toggle" title="Tema Değiştir">
       <span class="theme-icon" id="theme-icon">☀</span>
@@ -25,6 +26,7 @@
     <button class="tab-btn" data-tab="task">⚡ Görev</button>
     <button class="tab-btn" data-tab="history">🕓 Geçmiş</button>
     <button class="tab-btn" data-tab="recordings">⏺ Kayıtlar</button>
+    <button class="tab-btn" data-tab="studio">🧩 Profil</button>
     <button class="tab-btn" data-tab="settings">⚙️ Ayarlar</button>
     <button class="tab-btn" data-tab="memory">🧠 Memory</button>
   </div>
@@ -168,6 +170,171 @@
     </div>
   </div>
 
+  <!-- ===== STUDIO (PROFIL) TAB ===== -->
+  <div class="tab-panel" id="tab-studio">
+    <div class="settings-panel">
+
+      <div class="studio-subnav">
+        <button class="studio-nav-btn active" data-studio="personas">🎭 Kişilikler</button>
+        <button class="studio-nav-btn" data-studio="kbs">📚 Bilgi Tabanları</button>
+        <button class="studio-nav-btn" data-studio="skills">🛠 Yetenekler</button>
+        <button class="studio-nav-btn" data-studio="files">📁 Dosyalar</button>
+      </div>
+
+      <!-- Local files sub-panel (File System Access API — panel açıkken) -->
+      <div class="studio-panel" id="studio-files">
+        <div style="font-size:12px; color:var(--text3); margin-bottom:8px;">
+          Ajanın okuyup yazabilmesi için bilgisayarınızdan dosya/klasör seçin. Erişim yalnızca bu panel açıkken çalışır; yetkiyi istediğiniz zaman kaldırabilirsiniz.
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <button class="btn btn-secondary" id="local-pick-file" style="flex:1;">📄 Dosya Seç</button>
+          <button class="btn btn-secondary" id="local-pick-dir" style="flex:1;">📁 Klasör Seç</button>
+        </div>
+        <div id="local-files-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
+      </div>
+
+      <!-- Personas sub-panel -->
+      <div class="studio-panel active" id="studio-personas">
+        <div id="persona-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
+        <button class="btn btn-primary" id="persona-new-btn" style="width:100%; margin-top:8px;">＋ Yeni Kişilik</button>
+
+        <div class="settings-section" id="persona-form" style="display:none; margin-top:12px;">
+          <div class="settings-title" id="persona-form-title">Yeni Kişilik</div>
+          <div class="form-row">
+            <label class="form-label">Ad</label>
+            <input type="text" class="form-input" id="persona-name" placeholder="Örn: Avukat, Pazarlamacı, Araştırmacı">
+          </div>
+          <div class="form-row">
+            <label class="form-label">Emoji</label>
+            <input type="text" class="form-input" id="persona-emoji" placeholder="🎭" style="width:80px;">
+          </div>
+          <div class="form-row">
+            <label class="form-label">Kişilik Promptu</label>
+            <textarea class="form-textarea" id="persona-prompt" placeholder="Örn: Sen deneyimli bir hukuk asistanısın. Resmi bir dille yanıt ver, her iddiaya kaynak göster..."></textarea>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Bağlı Bilgi Tabanları <span style="color:var(--text3);font-weight:400">(RAG bunlardan beslenir)</span></label>
+            <div id="persona-kb-checks" style="font-size:12px; color:var(--text2);">—</div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Bağlı Yetenekler</label>
+            <div id="persona-skill-checks" style="font-size:12px; color:var(--text2);">—</div>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Model Override <span style="color:var(--text3);font-weight:400">(boş = varsayılan)</span></label>
+            <input type="text" class="form-input" id="persona-model" placeholder="Örn: qwen2.5:14b">
+          </div>
+          <div class="form-row">
+            <label class="form-label">Sıcaklık Override <span style="color:var(--text3);font-weight:400">(boş = varsayılan)</span></label>
+            <input type="number" class="form-input" id="persona-temp" min="0" max="2" step="0.1" placeholder="0.7">
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-primary" id="persona-save-btn">✓ Kaydet</button>
+            <button class="btn btn-secondary" id="persona-cancel-btn">İptal</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Knowledge Bases sub-panel -->
+      <div class="studio-panel" id="studio-kbs">
+        <div id="kb-main">
+          <div style="display:flex; gap:8px; margin-bottom:8px;">
+            <input type="text" class="form-input" id="kb-new-name" placeholder="Yeni bilgi tabanı adı" style="flex:1;">
+            <button class="btn btn-primary" id="kb-create-btn">＋ Oluştur</button>
+          </div>
+          <div id="kb-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
+        </div>
+
+        <div id="kb-detail" style="display:none;">
+          <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px; flex-wrap:wrap;">
+            <button class="btn btn-secondary btn-sm" id="kb-back-btn">← Geri</button>
+            <div style="font-weight:600; color:var(--text1); flex:1;" id="kb-detail-title"></div>
+            <button class="btn btn-secondary btn-sm" id="kb-reindex-btn" title="Tüm dokümanları mevcut embedding modeliyle yeniden indeksle">↻ Yeniden İndeksle</button>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-title">Doküman Ekle</div>
+            <textarea class="form-textarea" id="kb-paste-text" placeholder="Metni buraya yapıştır..."></textarea>
+            <input type="text" class="form-input" id="kb-paste-name" placeholder="Doküman adı (opsiyonel)" style="margin-top:6px;">
+            <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap;">
+              <button class="btn btn-primary btn-sm" id="kb-add-text-btn">📝 Metni Ekle</button>
+              <label class="btn btn-secondary btn-sm" style="cursor:pointer;">
+                📄 Dosya Yükle (.txt/.md/.pdf)
+                <input type="file" id="kb-file-input" accept=".txt,.md,.pdf" style="display:none;">
+              </label>
+              <button class="btn btn-secondary btn-sm" id="kb-save-page-btn">🌐 Bu Sayfayı Kaydet</button>
+            </div>
+            <div id="kb-add-status" style="font-size:12px; color:var(--text2); margin-top:6px;"></div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-title">🔎 Konu Araştır ve Ekle</div>
+            <div style="font-size:12px; color:var(--text3); margin-bottom:6px;">Bir konu yazın; ajan web'de araştırıp bulgularını bu bilgi tabanına ekler.</div>
+            <input type="text" class="form-input" id="kb-research-topic" placeholder="Örn: 2025 KVKK değişiklikleri, React Server Components">
+            <button class="btn btn-primary btn-sm" id="kb-research-btn" style="margin-top:8px;">🔎 Araştır ve Ekle</button>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-title">Dokümanlar</div>
+            <div id="kb-doc-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-title">Arama Testi</div>
+            <div style="display:flex; gap:8px;">
+              <input type="text" class="form-input" id="kb-search-input" placeholder="Bilgi tabanında ara..." style="flex:1;">
+              <button class="btn btn-secondary btn-sm" id="kb-search-btn">Ara</button>
+            </div>
+            <div id="kb-search-results" style="font-size:12px; margin-top:8px;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skills sub-panel -->
+      <div class="studio-panel" id="studio-skills">
+        <div id="skill-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn btn-primary" id="skill-new-btn" style="flex:1;">＋ Yeni Yetenek</button>
+          <select class="form-select" id="skill-import-select" style="flex:1;">
+            <option value="">⏺ Kayıttan içe aktar…</option>
+          </select>
+        </div>
+
+        <div class="settings-section" id="skill-form" style="display:none; margin-top:12px;">
+          <div class="settings-title" id="skill-form-title">Yeni Yetenek</div>
+          <div class="form-row">
+            <label class="form-label">Tip</label>
+            <select class="form-input" id="skill-type">
+              <option value="prompt">Prompt — talimat paketi</option>
+              <option value="macro">Makro — aksiyon dizisi</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label class="form-label">Ad <span style="color:var(--text3);font-weight:400">(benzersiz — ajan bu adla çağırır)</span></label>
+            <input type="text" class="form-input" id="skill-name" placeholder="Örn: tweet-yazma-stili">
+          </div>
+          <div class="form-row">
+            <label class="form-label">Açıklama <span style="color:var(--text3);font-weight:400">(ajan ne zaman kullanacağına buna bakarak karar verir)</span></label>
+            <input type="text" class="form-input" id="skill-desc" placeholder="Örn: Tweet yazarken kullanılacak stil kuralları">
+          </div>
+          <div class="form-row" id="skill-instructions-row">
+            <label class="form-label">Talimatlar</label>
+            <textarea class="form-textarea" id="skill-instructions" placeholder="Ajanın izleyeceği detaylı talimatlar..."></textarea>
+          </div>
+          <div class="form-row" id="skill-steps-row" style="display:none;">
+            <label class="form-label">Adımlar (JSON)</label>
+            <textarea class="form-textarea" id="skill-steps" placeholder='[{"action":"navigate","value":"https://..."},{"action":"click","selector":"#buton"},{"action":"type","selector":"#alan","value":"metin"}]'></textarea>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-primary" id="skill-save-btn">✓ Kaydet</button>
+            <button class="btn btn-secondary" id="skill-cancel-btn">İptal</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
   <!-- ===== SETTINGS TAB ===== -->
   <div class="tab-panel" id="tab-settings">
     <div class="settings-panel">
@@ -283,6 +450,55 @@
             <div class="toggle-track"></div>
             <div class="toggle-thumb"></div>
           </label>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">Bilgi Tabanı (RAG)</div>
+
+        <div class="toggle-row" style="margin-bottom:4px;">
+          <span class="form-label">RAG Etkin <span style="color:var(--text3);font-weight:400">(bağlı KB'lerden otomatik bağlam)</span></span>
+          <label class="toggle">
+            <input type="checkbox" id="rag-enabled" checked>
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Embedding Modeli <span style="color:var(--text3);font-weight:400">(yoksa anahtar kelime araması kullanılır)</span></label>
+          <input type="text" class="form-input" id="embedding-model" placeholder="nomic-embed-text">
+          <div style="font-size:11px; color:var(--text3); margin-top:4px;">
+            Yerel kullanım için: <code>ollama pull nomic-embed-text</code>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Getirilecek Parça Sayısı (Top-K)</label>
+          <input type="number" class="form-input" id="rag-topk" value="5" min="1" max="20" step="1">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">🛡️ Güvenlik Testi</div>
+
+        <div class="toggle-row" style="margin-bottom:4px;">
+          <span class="form-label">Aktif Test (payload gönderme)
+            <span style="color:var(--text3);font-weight:400;display:block;">Kapalıyken yalnızca pasif denetim yapılır</span>
+          </span>
+          <label class="toggle">
+            <input type="checkbox" id="active-security-testing">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Yetkili Hedefler <span style="color:var(--text3);font-weight:400">(her satıra bir alan adı — aktif test SADECE burada yapılır)</span></label>
+          <textarea class="form-textarea" id="security-authorized-targets" placeholder="benimsitem.com&#10;test.benimsitem.com&#10;localhost:3000"></textarea>
+          <div style="font-size:11px; color:var(--text3); margin-top:4px;">
+            ⚠️ Yalnızca sahibi olduğun veya açık yazılı iznin bulunan sistemleri ekle. Yıkıcı test (veri silme, hesap ele geçirme, DoS) her durumda yapılmaz — sadece kanıt amaçlı (PoC) doğrulama.
+          </div>
         </div>
       </div>
 

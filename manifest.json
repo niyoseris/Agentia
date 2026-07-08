@@ -11,7 +11,9 @@
     "storage",
     "sidePanel",
     "contextMenus",
-    "alarms"
+    "alarms",
+    "downloads",
+    "offscreen"
   ],
 
   "host_permissions": [

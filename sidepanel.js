@@ -1,6 +1,7 @@
 // Agentia Side Panel — Main UI Logic
 
 import { addModelToHistory } from './settings-handler.js';
+import { pickFiles, pickDirectory, listHandles, removeHandle, handleLocalFileRequest } from './local-files.js';
 
 const bg = (type, payload) =>
   new Promise((resolve, reject) => {
@@ -46,6 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupHistory();
   setupRecordings();
   setupSettings();
+  setupStudio();
   setupKeyboardShortcuts();
   setupTheme();
   await loadSettings();
@@ -53,8 +55,26 @@ document.addEventListener('DOMContentLoaded', async () => {
   await refreshRecordings();
   await refreshHistory();
   await loadChatHistory();
+  loadPersonaSwitcher();
   getCurrentTab();
+  resyncActiveTask();
 });
+
+// Rehydrate a task that ran (or is still running) while the panel was closed
+async function resyncActiveTask() {
+  try {
+    const active = await bgWithRetry('GET_ACTIVE_TASK', {});
+    if (!active || !active.events || active.events.length === 0) return;
+    // Only rehydrate an in-progress task; completed/stopped/errored ones live in history
+    if (active.status !== 'running') return;
+    switchTab('task');
+    taskLog('info', '↻ Devam eden görev geri yüklendi (panel kapalıyken sürdü)');
+    for (const evt of active.events) handleAgentEvent(evt);
+    setTaskRunning(true); // reconnect to the live event stream
+  } catch (err) {
+    console.warn('[Agentia] Active task resync failed:', err.message);
+  }
+}
 
 async function getCurrentTab() {
   try {
@@ -66,25 +86,40 @@ async function getCurrentTab() {
 }
 
 // ---- Background Event Listener ----
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, data, chunk, status, recording, recordingId } = message;
 
   if (type === 'STREAM_CHUNK') handleStreamChunk(chunk);
   if (type === 'AGENT_EVENT') handleAgentEvent(data);
   if (type === 'RECORDING_STATUS') handleRecordingStatus(status, recording, recordingId);
   if (type === 'PULL_PROGRESS') handlePullProgress(data);
+  if (type === 'KB_EVENT') handleKbEvent(data);
+
+  // Service worker asks the panel to perform a File System Access operation
+  if (type === 'LOCAL_FILE_REQUEST') {
+    handleLocalFileRequest(message.op, message.payload || {})
+      .then(result => sendResponse({ success: true, data: result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true; // keep the channel open for the async response
+  }
 });
 
 // ---- Tab Switching ----
 function setupTabs() {
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-    });
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+}
+
+// Programmatically activate a tab by its data-tab name
+function switchTab(name) {
+  const btn = document.querySelector(`.tab-btn[data-tab="${name}"]`);
+  const panel = document.getElementById(`tab-${name}`);
+  if (!btn || !panel) return;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  panel.classList.add('active');
 }
 
 // ---- Connection / Settings ----
@@ -136,6 +171,11 @@ async function loadSettings() {
     if (s.thinkingMode !== undefined) document.getElementById('thinking-mode').value = s.thinkingMode;
     if (s.visionEnabled !== undefined) document.getElementById('vision-enabled').value = s.visionEnabled;
     if (s.autoRecord) document.getElementById('auto-record').checked = s.autoRecord;
+    if (s.embeddingModel !== undefined) document.getElementById('embedding-model').value = s.embeddingModel;
+    document.getElementById('rag-enabled').checked = s.ragEnabled !== false;
+    if (s.ragTopK !== undefined) document.getElementById('rag-topk').value = s.ragTopK;
+    document.getElementById('active-security-testing').checked = !!s.activeSecurityTesting;
+    if (s.securityAuthorizedTargets !== undefined) document.getElementById('security-authorized-targets').value = s.securityAuthorizedTargets;
     updateModelBadge(s.model);
   } catch {}
 }
@@ -204,7 +244,12 @@ function setupSettings() {
       maxIterations: parseInt(document.getElementById('max-iterations').value),
       thinkingMode: document.getElementById('thinking-mode').value,
       visionEnabled: document.getElementById('vision-enabled').value,
-      autoRecord: document.getElementById('auto-record').checked
+      autoRecord: document.getElementById('auto-record').checked,
+      embeddingModel: document.getElementById('embedding-model').value.trim(),
+      ragEnabled: document.getElementById('rag-enabled').checked,
+      ragTopK: parseInt(document.getElementById('rag-topk').value) || 5,
+      activeSecurityTesting: document.getElementById('active-security-testing').checked,
+      securityAuthorizedTargets: document.getElementById('security-authorized-targets').value.trim()
     };
     const settings = addModelToHistory(base, currentModel);
     try {
@@ -1002,17 +1047,35 @@ async function loadMemory() {
   }
 }
 
+let _learnedFilter = '';
+
 function renderMemory(data) {
   // Learned facts
   const learnedEl = document.getElementById('memory-learned-list');
-  if (data.learned && data.learned.length > 0) {
-    learnedEl.innerHTML = data.learned.map(l => `
+  const learned = data.learned || [];
+  if (learned.length > 0) {
+    // Category filter dropdown
+    const cats = [...new Set(learned.map(l => l.category || 'genel'))].sort();
+    if (_learnedFilter && !cats.includes(_learnedFilter)) _learnedFilter = '';
+    const filtered = _learnedFilter ? learned.filter(l => (l.category || 'genel') === _learnedFilter) : learned;
+    const filterHtml = cats.length > 1
+      ? `<select id="learned-cat-filter" style="margin-bottom:8px; padding:4px 6px; background:var(--bg2); color:var(--text1); border:1px solid var(--border); border-radius:6px; font-size:12px;">
+          <option value="">Tüm kategoriler (${learned.length})</option>
+          ${cats.map(c => `<option value="${escHtml(c)}" ${c === _learnedFilter ? 'selected' : ''}>${escHtml(c)}</option>`).join('')}
+        </select>`
+      : '';
+    learnedEl.innerHTML = filterHtml + filtered.map(l => `
       <div style="margin-bottom:8px; padding:8px; background:var(--bg3); border-radius:6px;">
-        <div style="font-weight:600; color:var(--text1);">${escHtml(l.topic)}</div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <div style="font-weight:600; color:var(--text1);">${escHtml(l.topic)}</div>
+          <span style="font-size:10px; padding:1px 6px; background:var(--bg2); color:var(--text3); border-radius:8px;">${escHtml(l.category || 'genel')}</span>
+        </div>
         <div style="color:var(--text2); margin-top:2px;">${escHtml(l.info)}</div>
         <button data-action="delete-learned" data-id="${escHtml(l.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer; margin-top:4px;">Sil</button>
       </div>
     `).join('');
+    const filterEl = learnedEl.querySelector('#learned-cat-filter');
+    if (filterEl) filterEl.addEventListener('change', () => { _learnedFilter = filterEl.value; renderMemory(data); });
     learnedEl.querySelectorAll('[data-action="delete-learned"]').forEach(btn => {
       btn.addEventListener('click', () => deleteLearned(btn.dataset.id));
     });
@@ -1106,6 +1169,622 @@ document.querySelectorAll('[data-tab="memory"]').forEach(btn => {
   });
 });
 
+// ---- Studio (Profil) Tab: Personas, Knowledge Bases, Skills ----
+let studioPersonas = [];
+let studioKbs = [];
+let studioSkills = [];
+let activePersonaId = null;
+let currentKbId = null;
+
+async function renderLocalFiles() {
+  const el = document.getElementById('local-files-list');
+  if (!el) return;
+  try {
+    const handles = await listHandles();
+    if (handles.length === 0) {
+      el.innerHTML = '<div style="color:var(--text3);">Henüz yetkili dosya/klasör yok. Yukarıdan seçin.</div>';
+      return;
+    }
+    el.innerHTML = handles.map(h => `
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px; padding:8px; background:var(--bg3); border-radius:6px;">
+        <span>${h.kind === 'directory' ? '📁' : '📄'}</span>
+        <div style="flex:1; min-width:0;">
+          <div style="color:var(--text1); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escHtml(h.name)}</div>
+          <div style="font-size:10px; color:var(--text3);">id: ${escHtml(h.id)}</div>
+        </div>
+        <button data-action="remove-local" data-id="${escHtml(h.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer;">Kaldır</button>
+      </div>
+    `).join('');
+    el.querySelectorAll('[data-action="remove-local"]').forEach(btn => {
+      btn.addEventListener('click', async () => { await removeHandle(btn.dataset.id); renderLocalFiles(); });
+    });
+  } catch (err) {
+    el.textContent = 'Hata: ' + err.message;
+  }
+}
+
+function setupStudio() {
+  // Sub-nav switching
+  document.querySelectorAll('.studio-nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.studio-nav-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.studio-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(`studio-${btn.dataset.studio}`).classList.add('active');
+    });
+  });
+
+  // Refresh when the tab is opened
+  document.querySelectorAll('[data-tab="studio"]').forEach(btn => {
+    btn.addEventListener('click', () => setTimeout(refreshStudio, 100));
+  });
+
+  // Local files
+  document.getElementById('local-pick-file').addEventListener('click', async () => {
+    try { await pickFiles(); await renderLocalFiles(); }
+    catch (err) { if (err.name !== 'AbortError') alert('Dosya seçilemedi: ' + err.message); }
+  });
+  document.getElementById('local-pick-dir').addEventListener('click', async () => {
+    try { await pickDirectory(); await renderLocalFiles(); }
+    catch (err) { if (err.name !== 'AbortError') alert('Klasör seçilemedi: ' + err.message); }
+  });
+  document.querySelectorAll('[data-studio="files"]').forEach(btn => {
+    btn.addEventListener('click', () => renderLocalFiles());
+  });
+
+  // Personas
+  document.getElementById('persona-new-btn').addEventListener('click', () => openPersonaForm(null));
+  document.getElementById('persona-cancel-btn').addEventListener('click', () => {
+    document.getElementById('persona-form').style.display = 'none';
+  });
+  document.getElementById('persona-save-btn').addEventListener('click', savePersonaForm);
+
+  // Knowledge bases
+  document.getElementById('kb-create-btn').addEventListener('click', createKb);
+  document.getElementById('kb-back-btn').addEventListener('click', showKbList);
+  document.getElementById('kb-reindex-btn').addEventListener('click', reindexCurrentKb);
+  document.getElementById('kb-add-text-btn').addEventListener('click', addTextDocToKb);
+  document.getElementById('kb-file-input').addEventListener('change', handleKbFileUpload);
+  document.getElementById('kb-save-page-btn').addEventListener('click', savePageToKb);
+  document.getElementById('kb-research-btn').addEventListener('click', startKbResearch);
+  document.getElementById('kb-search-btn').addEventListener('click', runKbSearchTest);
+  document.getElementById('kb-search-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runKbSearchTest();
+  });
+
+  // Skills
+  document.getElementById('skill-new-btn').addEventListener('click', () => openSkillForm(null));
+  document.getElementById('skill-cancel-btn').addEventListener('click', () => {
+    document.getElementById('skill-form').style.display = 'none';
+  });
+  document.getElementById('skill-save-btn').addEventListener('click', saveSkillForm);
+  document.getElementById('skill-type').addEventListener('change', toggleSkillTypeRows);
+  document.getElementById('skill-import-select').addEventListener('change', importSkillFromRecording);
+
+  // Header persona switcher
+  document.getElementById('persona-switcher').addEventListener('change', async (e) => {
+    try {
+      const persona = await bg('PERSONA_SET_ACTIVE', { id: e.target.value });
+      activePersonaId = persona.id;
+      const s = await bg('GET_SETTINGS', {});
+      updateModelBadge(persona.modelOverride || s.model);
+      renderPersonaList();
+    } catch (err) {
+      console.warn('[Agentia] Persona switch failed:', err.message);
+    }
+  });
+}
+
+async function refreshStudio() {
+  try {
+    const [personaData, kbs, skills] = await Promise.all([
+      bgWithRetry('PERSONA_LIST', {}),
+      bgWithRetry('KB_LIST', {}),
+      bgWithRetry('SKILL_LIST', {})
+    ]);
+    studioPersonas = personaData.personas || [];
+    activePersonaId = personaData.activePersonaId;
+    studioKbs = kbs || [];
+    studioSkills = skills || [];
+    renderPersonaList();
+    renderKbList();
+    renderSkillList();
+    populateSkillImportSelect();
+    populatePersonaSwitcherFromState();
+  } catch (err) {
+    document.getElementById('persona-list').textContent = 'Hata: ' + err.message;
+  }
+}
+
+// ---- Persona switcher (header) ----
+async function loadPersonaSwitcher() {
+  try {
+    const data = await bgWithRetry('PERSONA_LIST', {});
+    studioPersonas = data.personas || [];
+    activePersonaId = data.activePersonaId;
+    populatePersonaSwitcherFromState();
+    // Reflect the active persona's model override in the badge
+    const active = studioPersonas.find(p => p.id === activePersonaId);
+    if (active?.modelOverride) updateModelBadge(active.modelOverride);
+  } catch (e) {
+    console.warn('[Agentia] Persona switcher load failed:', e.message);
+  }
+}
+
+function populatePersonaSwitcherFromState() {
+  const sel = document.getElementById('persona-switcher');
+  sel.innerHTML = studioPersonas
+    .map(p => `<option value="${escHtml(p.id)}"${p.id === activePersonaId ? ' selected' : ''}>${escHtml(p.emoji)} ${escHtml(p.name)}</option>`)
+    .join('');
+}
+
+// ---- Personas ----
+function renderPersonaList() {
+  const el = document.getElementById('persona-list');
+  if (studioPersonas.length === 0) {
+    el.innerHTML = '<div style="color:var(--text3);">Henüz kişilik yok.</div>';
+    return;
+  }
+  el.innerHTML = studioPersonas.map(p => {
+    const isActive = p.id === activePersonaId;
+    const kbNames = (p.kbIds || []).map(id => studioKbs.find(k => k.id === id)?.name).filter(Boolean);
+    const skillNames = (p.skillIds || []).map(id => studioSkills.find(s => s.id === id)?.name).filter(Boolean);
+    const details = [
+      p.modelOverride ? `model: ${escHtml(p.modelOverride)}` : '',
+      kbNames.length ? `KB: ${escHtml(kbNames.join(', '))}` : '',
+      skillNames.length ? `Yetenek: ${escHtml(skillNames.join(', '))}` : ''
+    ].filter(Boolean).join(' · ');
+    return `
+      <div class="studio-card${isActive ? ' active-persona' : ''}">
+        <div class="studio-card-title">${escHtml(p.emoji)} ${escHtml(p.name)} ${isActive ? '<span style="font-size:10px; color:var(--accent);">● aktif</span>' : ''}</div>
+        ${p.personalityPrompt ? `<div class="studio-card-desc">${escHtml(p.personalityPrompt.substring(0, 120))}${p.personalityPrompt.length > 120 ? '…' : ''}</div>` : ''}
+        ${details ? `<div class="studio-card-desc">${details}</div>` : ''}
+        <div class="studio-card-actions">
+          ${!isActive ? `<button data-action="persona-activate" data-id="${escHtml(p.id)}">Aktif Yap</button>` : ''}
+          <button data-action="persona-edit" data-id="${escHtml(p.id)}">Düzenle</button>
+          ${p.id !== 'default' ? `<button data-action="persona-delete" data-id="${escHtml(p.id)}" class="danger">Sil</button>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+
+  el.querySelectorAll('[data-action="persona-activate"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const persona = await bg('PERSONA_SET_ACTIVE', { id: btn.dataset.id });
+      activePersonaId = persona.id;
+      const s = await bg('GET_SETTINGS', {});
+      updateModelBadge(persona.modelOverride || s.model);
+      populatePersonaSwitcherFromState();
+      renderPersonaList();
+    });
+  });
+  el.querySelectorAll('[data-action="persona-edit"]').forEach(btn => {
+    btn.addEventListener('click', () => openPersonaForm(studioPersonas.find(p => p.id === btn.dataset.id)));
+  });
+  el.querySelectorAll('[data-action="persona-delete"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Bu kişilik silinecek. Emin misiniz?')) return;
+      await bg('PERSONA_DELETE', { id: btn.dataset.id });
+      await refreshStudio();
+      loadPersonaSwitcher();
+    });
+  });
+}
+
+let editingPersonaId = null;
+
+function openPersonaForm(persona) {
+  editingPersonaId = persona?.id || null;
+  document.getElementById('persona-form').style.display = 'block';
+  document.getElementById('persona-form-title').textContent = persona ? `Düzenle: ${persona.name}` : 'Yeni Kişilik';
+  document.getElementById('persona-name').value = persona?.name || '';
+  document.getElementById('persona-emoji').value = persona?.emoji || '';
+  document.getElementById('persona-prompt').value = persona?.personalityPrompt || '';
+  document.getElementById('persona-model').value = persona?.modelOverride || '';
+  document.getElementById('persona-temp').value = persona?.temperatureOverride ?? '';
+
+  const kbChecks = document.getElementById('persona-kb-checks');
+  kbChecks.innerHTML = studioKbs.length
+    ? studioKbs.map(kb => `
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px; cursor:pointer;">
+          <input type="checkbox" class="persona-kb-check" value="${escHtml(kb.id)}"${persona?.kbIds?.includes(kb.id) ? ' checked' : ''}>
+          ${escHtml(kb.name)} <span style="color:var(--text3);">(${kb.docCount} doküman)</span>
+        </label>`).join('')
+    : '<span style="color:var(--text3);">Henüz bilgi tabanı yok — önce 📚 sekmesinden oluşturun.</span>';
+
+  const skillChecks = document.getElementById('persona-skill-checks');
+  skillChecks.innerHTML = studioSkills.length
+    ? studioSkills.map(s => `
+        <label style="display:flex; align-items:center; gap:6px; margin-bottom:2px; cursor:pointer;">
+          <input type="checkbox" class="persona-skill-check" value="${escHtml(s.id)}"${persona?.skillIds?.includes(s.id) ? ' checked' : ''}>
+          ${escHtml(s.name)} <span style="color:var(--text3);">[${s.type}]</span>
+        </label>`).join('')
+    : '<span style="color:var(--text3);">Henüz yetenek yok — 🛠 sekmesinden oluşturabilirsiniz.</span>';
+}
+
+async function savePersonaForm() {
+  const payload = {
+    id: editingPersonaId || undefined,
+    name: document.getElementById('persona-name').value.trim(),
+    emoji: document.getElementById('persona-emoji').value.trim(),
+    personalityPrompt: document.getElementById('persona-prompt').value,
+    kbIds: [...document.querySelectorAll('.persona-kb-check:checked')].map(c => c.value),
+    skillIds: [...document.querySelectorAll('.persona-skill-check:checked')].map(c => c.value),
+    modelOverride: document.getElementById('persona-model').value.trim(),
+    temperatureOverride: document.getElementById('persona-temp').value
+  };
+  if (!payload.name) { alert('Kişilik adı gerekli'); return; }
+  try {
+    await bg('PERSONA_SAVE', payload);
+    document.getElementById('persona-form').style.display = 'none';
+    await refreshStudio();
+    loadPersonaSwitcher();
+  } catch (err) {
+    alert('Kaydedilemedi: ' + err.message);
+  }
+}
+
+// ---- Knowledge Bases ----
+function renderKbList() {
+  const el = document.getElementById('kb-list');
+  if (studioKbs.length === 0) {
+    el.innerHTML = '<div style="color:var(--text3);">Henüz bilgi tabanı yok. Yukarıdan bir tane oluşturun; sonra doküman ekleyip bir kişiliğe bağlayın.</div>';
+    return;
+  }
+  el.innerHTML = studioKbs.map(kb => `
+    <div class="studio-card">
+      <div class="studio-card-title">📚 ${escHtml(kb.name)}</div>
+      <div class="studio-card-desc">${kb.docCount} doküman · ${kb.chunkCount} parça${kb.description ? ' — ' + escHtml(kb.description) : ''}</div>
+      <div class="studio-card-actions">
+        <button data-action="kb-open" data-id="${escHtml(kb.id)}">Aç</button>
+        <button data-action="kb-delete" data-id="${escHtml(kb.id)}" class="danger">Sil</button>
+      </div>
+    </div>`).join('');
+
+  el.querySelectorAll('[data-action="kb-open"]').forEach(btn => {
+    btn.addEventListener('click', () => openKbDetail(btn.dataset.id));
+  });
+  el.querySelectorAll('[data-action="kb-delete"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Bilgi tabanı ve tüm dokümanları silinecek. Emin misiniz?')) return;
+      await bg('KB_DELETE', { id: btn.dataset.id });
+      await refreshStudio();
+    });
+  });
+}
+
+async function createKb() {
+  const input = document.getElementById('kb-new-name');
+  const name = input.value.trim();
+  if (!name) return;
+  await bg('KB_CREATE', { name });
+  input.value = '';
+  await refreshStudio();
+}
+
+function showKbList() {
+  currentKbId = null;
+  document.getElementById('kb-detail').style.display = 'none';
+  document.getElementById('kb-main').style.display = 'block';
+}
+
+async function openKbDetail(kbId) {
+  currentKbId = kbId;
+  const kb = studioKbs.find(k => k.id === kbId);
+  document.getElementById('kb-detail-title').textContent = `📚 ${kb?.name || ''}`;
+  document.getElementById('kb-main').style.display = 'none';
+  document.getElementById('kb-detail').style.display = 'block';
+  document.getElementById('kb-add-status').textContent = '';
+  document.getElementById('kb-search-results').innerHTML = '';
+  await refreshKbDocs();
+}
+
+function docStatusBadge(doc) {
+  const map = {
+    done: ['done', '✓ indekslendi'],
+    partial: ['partial', '⏳ kısmi'],
+    pending: ['pending', '⏳ bekliyor'],
+    failed: ['keyword', '🔤 anahtar kelime modu'],
+    none: ['keyword', '🔤 anahtar kelime modu']
+  };
+  const [cls, label] = map[doc.embedStatus] || ['keyword', doc.embedStatus];
+  return `<span class="kb-status-badge ${cls}" data-doc-badge="${escHtml(doc.id)}">${label}</span>`;
+}
+
+async function refreshKbDocs() {
+  if (!currentKbId) return;
+  const el = document.getElementById('kb-doc-list');
+  try {
+    const docs = await bg('KB_LIST_DOCS', { kbId: currentKbId });
+    if (!docs || docs.length === 0) {
+      el.innerHTML = '<div style="color:var(--text3);">Henüz doküman yok.</div>';
+      return;
+    }
+    const typeIcons = { text: '📝', file: '📄', pdf: '📕', page: '🌐', research: '🔎' };
+    el.innerHTML = docs.map(d => `
+      <div class="studio-card">
+        <div class="studio-card-title">${typeIcons[d.sourceType] || '📄'} ${escHtml(d.name)} ${docStatusBadge(d)}</div>
+        <div class="studio-card-desc">${d.chunkCount} parça · ${Math.round(d.charCount / 1000)}k karakter${d.sourceUrl ? ' · ' + escHtml(d.sourceUrl.substring(0, 60)) : ''}</div>
+        <div class="studio-card-actions">
+          <button data-action="doc-view" data-id="${escHtml(d.id)}">Görüntüle</button>
+          <button data-action="doc-delete" data-id="${escHtml(d.id)}" class="danger">Sil</button>
+        </div>
+      </div>`).join('');
+    el.querySelectorAll('[data-action="doc-delete"]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await bg('KB_DELETE_DOC', { id: btn.dataset.id });
+        await refreshKbDocs();
+      });
+    });
+    el.querySelectorAll('[data-action="doc-view"]').forEach(btn => {
+      btn.addEventListener('click', () => viewKbDoc(btn.dataset.id));
+    });
+  } catch (err) {
+    el.textContent = 'Hata: ' + err.message;
+  }
+}
+
+// View a document's stored text in a new viewer tab
+async function viewKbDoc(docId) {
+  try {
+    const { text } = await bg('KB_GET_DOC_TEXT', { id: docId });
+    const html = `<pre style="white-space:pre-wrap; font-family:system-ui; padding:20px; line-height:1.5;">${escHtml(text || '(boş)')}</pre>`;
+    await bg('CREATE_FILE', { name: 'KB Doküman', content: html, type: 'html' });
+  } catch (err) {
+    alert('Doküman görüntülenemedi: ' + err.message);
+  }
+}
+
+// Start an agent task that researches a topic and adds findings to this KB
+async function startKbResearch() {
+  const topicEl = document.getElementById('kb-research-topic');
+  const topic = topicEl.value.trim();
+  if (!topic || !currentKbId) return;
+  await getCurrentTab();
+  if (!currentTabId) { alert('Aktif sekme bulunamadı. Lütfen bir sayfa açın.'); return; }
+
+  const task = `Şu konuyu web'de araştır ve topladığın bilgileri kb_add_document aracıyla şu bilgi tabanına ekle (kbId="${currentKbId}"). Her önemli kaynak/konu için ayrı bir kb_add_document çağrısı yap; name alanına açıklayıcı bir başlık, text alanına özetlenmiş içeriği, sourceUrl alanına kaynağın URL'sini koy. Konu: ${topic}`;
+
+  topicEl.value = '';
+  switchTab('task');
+  taskSessionMessages = null;
+  enterTaskSession(task);
+  setTaskRunning(true);
+  clearTaskLog();
+  taskLog('info', `🔎 Araştırma başlatıldı → "${topic}" bilgi tabanına eklenecek`);
+  try {
+    await bgWithRetry('AGENT_RUN_TASK', { task, tabId: currentTabId, messages: null });
+  } catch (err) {
+    taskLog('error', '✗ Başlatılamadı: ' + err.message);
+    setTaskRunning(false);
+  }
+}
+
+function setKbAddStatus(msg, isError = false) {
+  const el = document.getElementById('kb-add-status');
+  el.textContent = msg;
+  el.style.color = isError ? 'var(--red)' : 'var(--text2)';
+}
+
+async function addTextDocToKb() {
+  const text = document.getElementById('kb-paste-text').value.trim();
+  if (!text || !currentKbId) return;
+  const name = document.getElementById('kb-paste-name').value.trim() || `Not ${new Date().toLocaleDateString('tr-TR')}`;
+  setKbAddStatus('⏳ Ekleniyor ve indeksleniyor...');
+  await bg('KB_ADD_DOC', { kbId: currentKbId, name, sourceType: 'text', content: text });
+  document.getElementById('kb-paste-text').value = '';
+  document.getElementById('kb-paste-name').value = '';
+}
+
+async function handleKbFileUpload(e) {
+  const file = e.target.files?.[0];
+  e.target.value = ''; // Allow re-selecting the same file
+  if (!file || !currentKbId) return;
+  if (file.size > 20 * 1024 * 1024) {
+    setKbAddStatus('Dosya çok büyük (max 20MB)', true);
+    return;
+  }
+  setKbAddStatus(`⏳ "${file.name}" okunuyor...`);
+  try {
+    if (file.name.toLowerCase().endsWith('.pdf')) {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+      const base64 = btoa(binary);
+      setKbAddStatus('⏳ PDF işleniyor ve indeksleniyor...');
+      await bg('KB_ADD_DOC', { kbId: currentKbId, name: file.name, sourceType: 'pdf', contentBase64: base64 });
+    } else {
+      const text = await file.text();
+      setKbAddStatus('⏳ Ekleniyor ve indeksleniyor...');
+      await bg('KB_ADD_DOC', { kbId: currentKbId, name: file.name, sourceType: 'file', content: text });
+    }
+  } catch (err) {
+    setKbAddStatus('Hata: ' + err.message, true);
+  }
+}
+
+async function savePageToKb() {
+  if (!currentKbId) return;
+  setKbAddStatus('⏳ Sayfa içeriği alınıyor...');
+  try {
+    await bg('KB_ADD_DOC', { kbId: currentKbId, sourceType: 'page', tabId: currentTabId || undefined });
+  } catch (err) {
+    setKbAddStatus('Hata: ' + err.message, true);
+  }
+}
+
+async function reindexCurrentKb() {
+  if (!currentKbId) return;
+  setKbAddStatus('⏳ Yeniden indeksleniyor...');
+  await bg('KB_REINDEX', { kbId: currentKbId });
+}
+
+async function runKbSearchTest() {
+  const query = document.getElementById('kb-search-input').value.trim();
+  const el = document.getElementById('kb-search-results');
+  if (!query || !currentKbId) return;
+  el.innerHTML = 'Aranıyor...';
+  try {
+    const results = await bg('KB_SEARCH', { query, kbIds: [currentKbId], topK: 5 });
+    if (!results || results.length === 0) {
+      el.innerHTML = '<div style="color:var(--text3);">Sonuç bulunamadı.</div>';
+      return;
+    }
+    el.innerHTML = results.map(r => `
+      <div class="studio-card">
+        <div class="studio-card-desc">
+          <b>${escHtml(r.docName)}</b>${r.page ? ` (sayfa ${r.page})` : ''}
+          · skor ${r.score} · ${r.method === 'vector' ? '🧭 vektör' : '🔤 anahtar kelime'}
+        </div>
+        <div style="color:var(--text2); margin-top:4px;">${escHtml(r.text.substring(0, 300))}${r.text.length > 300 ? '…' : ''}</div>
+      </div>`).join('');
+  } catch (err) {
+    el.innerHTML = `<div style="color:var(--red);">Hata: ${escHtml(err.message)}</div>`;
+  }
+}
+
+// Live embed progress events from background
+function handleKbEvent(data) {
+  if (!data) return;
+  if (data.type === 'EMBED_PROGRESS') {
+    setKbAddStatus(`⏳ İndeksleniyor... ${data.done}/${data.total}`);
+    const badge = document.querySelector(`[data-doc-badge="${data.docId}"]`);
+    if (badge) { badge.textContent = `⏳ ${data.done}/${data.total}`; badge.className = 'kb-status-badge partial'; }
+  } else if (data.type === 'EMBED_DONE') {
+    const mode = data.embedStatus === 'done' ? 'vektör indeksi hazır' :
+      (data.embedStatus === 'none' || data.embedStatus === 'failed') ? 'anahtar kelime modunda eklendi' : 'kısmen indekslendi';
+    setKbAddStatus(`✓ Doküman eklendi (${data.chunkCount} parça, ${mode})`);
+    refreshKbDocs();
+    bgWithRetry('KB_LIST', {}).then(kbs => { studioKbs = kbs || []; renderKbList(); }).catch(() => {});
+  } else if (data.type === 'REINDEX_DONE') {
+    setKbAddStatus('✓ Yeniden indeksleme tamamlandı');
+    refreshKbDocs();
+  } else if (data.type === 'EMBED_ERROR') {
+    setKbAddStatus('Hata: ' + (data.error || 'indeksleme başarısız'), true);
+    refreshKbDocs();
+  }
+}
+
+// ---- Skills ----
+function renderSkillList() {
+  const el = document.getElementById('skill-list');
+  if (studioSkills.length === 0) {
+    el.innerHTML = '<div style="color:var(--text3);">Henüz yetenek yok. Prompt yeteneği (talimat paketi) oluşturun veya bir kaydı makroya dönüştürün.</div>';
+    return;
+  }
+  el.innerHTML = studioSkills.map(s => `
+    <div class="studio-card">
+      <div class="studio-card-title" style="display:flex; align-items:center; gap:6px;">
+        ${s.type === 'macro' ? '🎬' : '📜'} ${escHtml(s.name)}
+        <span class="kb-status-badge">${s.type}</span>
+        <label class="toggle" style="margin-left:auto;" title="Global olarak etkin (tüm kişiliklerde görünür)">
+          <input type="checkbox" class="skill-enable-check" data-id="${escHtml(s.id)}"${s.enabled ? ' checked' : ''}>
+          <div class="toggle-track"></div>
+          <div class="toggle-thumb"></div>
+        </label>
+      </div>
+      <div class="studio-card-desc">${escHtml(s.description || '')}${s.type === 'macro' ? ` · ${(s.steps || []).length} adım` : ''}</div>
+      <div class="studio-card-actions">
+        <button data-action="skill-edit" data-id="${escHtml(s.id)}">Düzenle</button>
+        <button data-action="skill-delete" data-id="${escHtml(s.id)}" class="danger">Sil</button>
+      </div>
+    </div>`).join('');
+
+  el.querySelectorAll('.skill-enable-check').forEach(check => {
+    check.addEventListener('change', async () => {
+      await bg('SKILL_SET_ENABLED', { id: check.dataset.id, enabled: check.checked });
+    });
+  });
+  el.querySelectorAll('[data-action="skill-edit"]').forEach(btn => {
+    btn.addEventListener('click', () => openSkillForm(studioSkills.find(s => s.id === btn.dataset.id)));
+  });
+  el.querySelectorAll('[data-action="skill-delete"]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      if (!confirm('Bu yetenek silinecek. Emin misiniz?')) return;
+      await bg('SKILL_DELETE', { id: btn.dataset.id });
+      await refreshStudio();
+    });
+  });
+}
+
+let editingSkillId = null;
+
+function toggleSkillTypeRows() {
+  const isMacro = document.getElementById('skill-type').value === 'macro';
+  document.getElementById('skill-instructions-row').style.display = isMacro ? 'none' : 'block';
+  document.getElementById('skill-steps-row').style.display = isMacro ? 'block' : 'none';
+}
+
+function openSkillForm(skill) {
+  editingSkillId = skill?.id || null;
+  document.getElementById('skill-form').style.display = 'block';
+  document.getElementById('skill-form-title').textContent = skill ? `Düzenle: ${skill.name}` : 'Yeni Yetenek';
+  document.getElementById('skill-type').value = skill?.type || 'prompt';
+  document.getElementById('skill-name').value = skill?.name || '';
+  document.getElementById('skill-desc').value = skill?.description || '';
+  document.getElementById('skill-instructions').value = skill?.instructions || '';
+  document.getElementById('skill-steps').value = skill?.steps?.length ? JSON.stringify(skill.steps, null, 2) : '';
+  toggleSkillTypeRows();
+}
+
+async function saveSkillForm() {
+  const type = document.getElementById('skill-type').value;
+  const payload = {
+    id: editingSkillId || undefined,
+    type,
+    name: document.getElementById('skill-name').value.trim(),
+    description: document.getElementById('skill-desc').value.trim(),
+    instructions: document.getElementById('skill-instructions').value,
+    enabled: true
+  };
+  if (!payload.name) { alert('Yetenek adı gerekli'); return; }
+  if (type === 'macro') {
+    const stepsRaw = document.getElementById('skill-steps').value.trim();
+    try {
+      payload.steps = stepsRaw ? JSON.parse(stepsRaw) : [];
+      if (!Array.isArray(payload.steps)) throw new Error('dizi olmalı');
+    } catch (err) {
+      alert('Adımlar geçerli JSON dizisi olmalı: ' + err.message);
+      return;
+    }
+  }
+  try {
+    await bg('SKILL_SAVE', payload);
+    document.getElementById('skill-form').style.display = 'none';
+    await refreshStudio();
+  } catch (err) {
+    alert('Kaydedilemedi: ' + err.message);
+  }
+}
+
+async function populateSkillImportSelect() {
+  const sel = document.getElementById('skill-import-select');
+  try {
+    const recordings = await bg('GET_RECORDINGS', {});
+    sel.innerHTML = '<option value="">⏺ Kayıttan içe aktar…</option>' +
+      (recordings || []).map(r => `<option value="${escHtml(r.id)}">${escHtml(r.name)} (${(r.events || []).length} adım)</option>`).join('');
+  } catch (e) {
+    console.warn('[Agentia] Recording list load failed:', e.message);
+  }
+}
+
+async function importSkillFromRecording(e) {
+  const recordingId = e.target.value;
+  e.target.value = '';
+  if (!recordingId) return;
+  const name = prompt('Makro yeteneğin adı:');
+  if (!name) return;
+  try {
+    await bg('SKILL_FROM_RECORDING', { recordingId, name, description: `${name} makrosu` });
+    await refreshStudio();
+  } catch (err) {
+    alert('İçe aktarılamadı: ' + err.message);
+  }
+}
+
 // ---- Chat Persistence ----
 async function saveChatHistory() {
   const trimmed = chatHistory.slice(-MAX_CHAT_MESSAGES);
@@ -1171,8 +1850,8 @@ function setupTheme() {
 // ---- Keyboard Shortcuts ----
 function setupKeyboardShortcuts() {
   document.addEventListener('keydown', (e) => {
-    // Ctrl+1 through Ctrl+6: Switch tabs
-    if (e.ctrlKey && e.key >= '1' && e.key <= '6') {
+    // Ctrl+1 through Ctrl+7: Switch tabs
+    if (e.ctrlKey && e.key >= '1' && e.key <= '7') {
       e.preventDefault();
       const tabButtons = document.querySelectorAll('.tab-btn');
       const idx = parseInt(e.key) - 1;

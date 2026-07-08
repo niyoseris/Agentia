@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Agentia Lifeline</title></head>
+<body>
+  <!-- Invisible lifeline document: keeps the MV3 service worker from being
+       evicted during long-running tasks by holding an open runtime port and a
+       silent looping audio element. Has no UI. -->
+  <audio id="lifeline" loop></audio>
+  <script src="offscreen.js"></script>
+</body>
+</html>

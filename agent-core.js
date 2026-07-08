@@ -16,6 +16,16 @@ export class AgentCore {
     this.thinkingMode = 'off'; // 'off', 'low', 'medium', 'high'
     this.visionEnabled = 'auto'; // 'auto', 'on', 'off'
     this.memoryStore = null; // Set by background.js after init
+    this.rag = null;          // RagEngine, set by background.js after init
+    this.personaStore = null; // Set by background.js after init
+    this.skillStore = null;   // Set by background.js after init
+    this.activePersona = null;
+    this.ragEnabled = true;
+    this.ragTopK = 5;
+    this.ragMaxChars = 4000;
+    this.activeSecurityTesting = false;   // Gates payload-sending security tests
+    this.securityAuthorizedTargets = '';  // Domains the user authorized for active testing
+    this._kbContextActive = false; // Raises num_ctx when KB context was injected
     this._visionCache = null; // Cache for model vision capability check
 
     // Runtime task state exposed for quick-report and UI introspection
@@ -47,6 +57,43 @@ export class AgentCore {
     return context ? '\n\n## Your Memories (from past sessions)\n' + context : '';
   }
 
+  // Assemble the complete system prompt: base + persona + skills + KB context + memory
+  async _buildFullSystemPrompt(userText) {
+    const persona = this.activePersona;
+    let personaPrompt = (persona?.personalityPrompt || '').substring(0, 2000);
+    personaPrompt += this._buildSecurityPolicy();
+
+    // Skills: one line per effective skill (progressive disclosure — full
+    // instructions load on demand via skill_use)
+    let skillsSection = '';
+    if (this.skillStore) {
+      const skills = this.skillStore.effectiveSkills(persona).slice(0, 20);
+      skillsSection = skills
+        .map(s => `- ${s.name} [${s.type}]: ${(s.description || '').substring(0, 150)}`)
+        .join('\n');
+    }
+
+    // KB context: retrieve top-k chunks from the persona's linked KBs
+    let kbContext = '';
+    this._kbContextActive = false;
+    if (this.rag && this.ragEnabled && persona?.kbIds?.length > 0 && userText) {
+      try {
+        kbContext = await this.rag.buildContext(userText, persona.kbIds, this.ragMaxChars, this.ragTopK);
+        this._kbContextActive = kbContext.length > 0;
+      } catch (err) {
+        console.warn('[Agentia] KB context build failed:', err.message);
+      }
+    }
+
+    return buildSystemPrompt(AGENT_SYSTEM_PROMPT_BASE, {
+      customPrompt: this.systemPrompt,
+      memoryContext: this._buildMemoryPrompt(userText),
+      personaPrompt,
+      skillsSection,
+      kbContext
+    });
+  }
+
   updateSettings(settings) {
     if (settings.ollamaUrl) this.localBase = settings.ollamaUrl;
     if (settings.cloudBase) this.cloudBase = settings.cloudBase;
@@ -62,11 +109,44 @@ export class AgentCore {
       this.visionEnabled = settings.visionEnabled;
       this._visionCache = null; // Reset cache when setting changes
     }
+    if (settings.ragEnabled !== undefined) this.ragEnabled = settings.ragEnabled;
+    if (settings.ragTopK !== undefined && settings.ragTopK !== null) this.ragTopK = settings.ragTopK;
+    if (settings.ragMaxChars !== undefined && settings.ragMaxChars !== null) this.ragMaxChars = settings.ragMaxChars;
+    if (settings.activeSecurityTesting !== undefined) this.activeSecurityTesting = settings.activeSecurityTesting;
+    if (settings.securityAuthorizedTargets !== undefined) this.securityAuthorizedTargets = settings.securityAuthorizedTargets;
+  }
+
+  // Security-testing policy block injected into the system prompt only when the
+  // user has explicitly enabled active testing. Absent = passive analysis only.
+  _buildSecurityPolicy() {
+    if (!this.activeSecurityTesting) return '';
+    const targets = (this.securityAuthorizedTargets || '').trim();
+    return `\n\n## AKTİF GÜVENLİK TESTİ POLİTİKASI (kullanıcı tarafından AÇIK)
+Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
+- Aktif test YALNIZCA şu yetkili hedeflerde yapılabilir: ${targets || '(henüz hedef tanımlanmadı — hedef girilene kadar aktif test YAPMA, yalnızca pasif gözlem)'}
+- Bu kapsam dışındaki hiçbir hedefe payload gönderme, form gönderme veya aktif test yapma; kapsam dışında yalnızca pasif gözlem yap.
+- Yıkıcı işlem YASAK: veri silme/değiştirme, gerçek hesap ele geçirme, DoS/yük testi, başka sunuculara yayılma, kanıt token'ı dışında veri sızdırma.
+- Her aktif test öncesi hedefin bu listede olduğunu ve kullanıcı onayını teyit et. Kanıt amaçlı (PoC) test et — zarar verme.`;
   }
 
   // Resolved API base (local or cloud)
   get apiBase() {
     return this.useCloud ? this.cloudBase : this.localBase;
+  }
+
+  // Active persona overrides
+  get effectiveModel() {
+    return this.activePersona?.modelOverride || this.model;
+  }
+
+  get effectiveTemperature() {
+    const t = this.activePersona?.temperatureOverride;
+    return (t !== null && t !== undefined && t !== '') ? t : this.temperature;
+  }
+
+  setActivePersona(persona) {
+    this.activePersona = persona || null;
+    this._visionCache = null; // Model may change with the persona
   }
 
   // Build fetch headers — adds auth only for cloud
@@ -92,7 +172,7 @@ export class AgentCore {
       const res = await fetch(`${this.apiBase}/api/show`, {
         method: 'POST',
         headers: this._headers(),
-        body: JSON.stringify({ name: this.model })
+        body: JSON.stringify({ name: this.effectiveModel })
       });
       if (res.ok) {
         const data = await res.json();
@@ -114,7 +194,7 @@ export class AgentCore {
 
   // Synchronous heuristic check — used when API check isn't available yet
   _isVisionByModelName() {
-    const name = this.model.toLowerCase();
+    const name = this.effectiveModel.toLowerCase();
     const visionFamilies = ['llava', 'bakllava', 'pixtral', 'minicpm-v', 'internvl', 'cogvlm', 'moondream'];
     const visionModels = [
       'llama4', 'llama-4',
@@ -194,7 +274,7 @@ export class AgentCore {
   // Build Ollama API options including thinking/reasoning settings
   _buildOptions(extraOpts = {}) {
     const opts = {
-      temperature: extraOpts.temperature ?? this.temperature,
+      temperature: extraOpts.temperature ?? this.effectiveTemperature,
       num_predict: extraOpts.num_predict ?? this.maxTokens
     };
 
@@ -208,6 +288,12 @@ export class AgentCore {
     } else {
       // Explicitly disable thinking — some reasoning models think by default
       opts.think = false;
+    }
+
+    // KB context injected: the system prompt grows several thousand tokens —
+    // Ollama's default 4096 window would silently truncate it
+    if (this._kbContextActive) {
+      opts.num_ctx = Math.max(opts.num_ctx || 0, 16384);
     }
 
     return opts;
@@ -285,40 +371,40 @@ export class AgentCore {
 
   // ---- Plain Chat (no tools) ----
   async chat(messages, tabId) {
-    const allMessages = this._withSystem(messages);
+    const allMessages = await this._withSystem(messages);
 
     const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
-        model: this.model,
+        model: this.effectiveModel,
         messages: allMessages,
         stream: false,
         options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
     const data = await res.json();
     return data.message?.content || '';
   }
 
   // ---- Streaming Chat (no tools) ----
   async streamChat(messages, tabId, onChunk) {
-    const allMessages = this._withSystem(messages);
+    const allMessages = await this._withSystem(messages);
 
     const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
       method: 'POST',
       headers: this._headers(),
       body: JSON.stringify({
-        model: this.model,
+        model: this.effectiveModel,
         messages: allMessages,
         stream: true,
         options: this._buildOptions()
       })
     });
 
-    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+    if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -364,23 +450,19 @@ export class AgentCore {
     this.agentTabIds = new Set();
     this.focusedTabId = tabId || null;
 
-    console.log(`[Agentia] Starting task with model=${this.model} base=${this.apiBase} cloud=${this.useCloud}`);
+    console.log(`[Agentia] Starting task with model=${this.effectiveModel} base=${this.apiBase} cloud=${this.useCloud}`);
 
     let messages;
 
-    // Inject current date/time into system prompt
-    const systemPrompt = buildSystemPrompt(
-      AGENT_SYSTEM_PROMPT_BASE,
-      this.systemPrompt,
-      this._buildMemoryPrompt(taskDescription)
-    );
+    // Full system prompt: persona + skills + KB context + memory + date/time
+    const systemPrompt = await this._buildFullSystemPrompt(taskDescription);
 
     if (existingMessages && existingMessages.length > 0) {
       // Continue existing session — append new user turn
       messages = [...existingMessages, { role: 'user', content: taskDescription }];
     } else {
       messages = [
-        { role: 'system', content: systemPrompt + (this.systemPrompt ? '\n\n' + this.systemPrompt : '') },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: taskDescription }
       ];
     }
@@ -437,9 +519,10 @@ export class AgentCore {
             if (parsed?.url) restoredUrl = parsed.url;
           }
           // Rebuild this.currentResearchBuffer from tool results in message history
-          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && parsed) {
+          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search', 'http_request'].includes(toolName) && parsed) {
             let snippet = '';
             if (parsed.text) snippet = parsed.text;
+            else if (parsed.body) snippet = parsed.body;
             else if (parsed.content) snippet = parsed.content;
             else if (parsed.results) snippet = parsed.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
             else if (parsed.elements) snippet = parsed.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
@@ -530,7 +613,7 @@ export class AgentCore {
           method: 'POST',
           headers: this._headers(),
           body: JSON.stringify({
-            model: this.model,
+            model: this.effectiveModel,
             messages: visionMessages,
             tools: AGENT_TOOLS,
             stream: false,
@@ -538,7 +621,7 @@ export class AgentCore {
           })
         }, 3, signal);
 
-        if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.model}]: ${await res.text()}`);
+        if (!res.ok) throw new Error(`Ollama error ${res.status} [${this.apiBase} → ${this.effectiveModel}]: ${await res.text()}`);
         data = await res.json();
         assistantMsg = data.message;
       } catch (err) {
@@ -603,7 +686,7 @@ export class AgentCore {
               method: 'POST',
               headers: this._headers(),
               body: JSON.stringify({
-                model: this.model, messages, tools: AGENT_TOOLS, stream: false,
+                model: this.effectiveModel, messages, tools: AGENT_TOOLS, stream: false,
                 options: this._buildOptions({ temperature: 0.2, num_predict: this.maxTokens })
               })
             }, 3, signal);
@@ -718,6 +801,8 @@ export class AgentCore {
           summary: result.substring(0, 500),
           success: true
         }).catch((e) => { console.warn('[Agentia] Memory save failed:', e.message); });
+        // Silent self-learn: extract general, portable knowledge from this task
+        this._extractLearnings(taskDescription, result).catch((e) => { console.warn('[Agentia] Self-learn failed:', e.message); });
         return { success: true, result, log, messages };
       }
 
@@ -730,7 +815,7 @@ export class AgentCore {
         'tab_get_active', 'tab_get_all', 'tab_screenshot',
         'dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all',
         'dom_get_summary', 'dom_extract', 'page_get_info', 'pdf_read',
-        'memory_recall', 'web_search',
+        'memory_recall', 'web_search', 'kb_search', 'skill_use',
         'dialog_detect', 'dialog_get_intercepted'
       ]);
 
@@ -780,9 +865,10 @@ export class AgentCore {
             if (toolName === 'tab_navigate' || toolName === 'tab_create') {
               currentPageUrl = toolResult?.url || '';
             }
-            if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && toolResult) {
+            if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search', 'http_request'].includes(toolName) && toolResult) {
               let snippet = '';
               if (toolResult.text) snippet = toolResult.text;
+              else if (toolResult.body && !toolResult.binary) snippet = toolResult.body;
               else if (toolResult.content) snippet = toolResult.content;
               else if (toolResult.results) snippet = toolResult.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
               else if (toolResult.elements) snippet = toolResult.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
@@ -800,7 +886,9 @@ export class AgentCore {
                 snippet = parts.join('\n');
               }
               if (snippet.length > 40) {
-                this.currentResearchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
+                // http_request carries its own final URL; other tools use the tracked page URL
+                const srcUrl = (toolName === 'http_request' && toolResult.url) ? toolResult.url : currentPageUrl;
+                this.currentResearchBuffer.push({ url: srcUrl, text: snippet.slice(0, 3000) });
               }
             }
 
@@ -925,7 +1013,7 @@ export class AgentCore {
         method: 'POST',
         headers: this._headers(),
         body: JSON.stringify({
-          model: this.model,
+          model: this.effectiveModel,
           messages: [
             {
               role: 'system',
@@ -963,6 +1051,74 @@ export class AgentCore {
       this._notify({ type: 'AGENT_THOUGHT', content: `HTML oluşturma hatası: ${e.message}` });
       return null;
     }
+  }
+
+  // ---- Silent Self-Learn ----
+  // After a task, extract 0–5 GENERAL (site-agnostic, reusable) facts and save
+  // them categorized. Runs an independent single LLM call so it never disturbs
+  // the finished task; failures are swallowed.
+  async _extractLearnings(taskDescription, result) {
+    // Combine the task result with collected research for source material
+    const research = (this.currentResearchBuffer || [])
+      .map(r => (typeof r === 'string' ? r : (r?.text || r?.content || '')))
+      .filter(Boolean).join('\n').substring(0, 6000);
+    const material = `Görev: ${taskDescription}\n\nSonuç: ${(result || '').substring(0, 3000)}\n\nAraştırma notları:\n${research}`.trim();
+    if (material.length < 80) return; // nothing meaningful to learn from
+
+    const prompt = `Aşağıdaki tamamlanmış görevden GENEL, tekrar kullanılabilir (siteye/oturuma bağlı OLMAYAN) bilgiler çıkar. Örnek: bir API'nin limiti, bir framework pattern'i, kalıcı bir kullanıcı tercihi, güvenilir bir kaynak. Geçici/tek seferlik ayrıntıları (bugünkü fiyat, tek bir arama sonucu) ATLA.
+
+Yalnızca geçerli JSON dizisi döndür, başka metin yok. En fazla 5 öğe. Öğrenilecek genel bilgi yoksa boş dizi [] döndür.
+Format: [{"topic":"kısa başlık","info":"tek cümle bilgi","category":"teknik|site-kullanımı|kullanıcı-tercihi|araştırma-bulgusu|genel"}]
+
+MATERYAL:
+${material}`;
+
+    let content;
+    try {
+      const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({
+          model: this.effectiveModel,
+          messages: [{ role: 'user', content: prompt }],
+          stream: false,
+          format: 'json',
+          options: { temperature: 0.2, num_predict: 800, think: false }
+        })
+      }, 2);
+      if (!res.ok) return;
+      const data = await res.json();
+      content = data.message?.content || '';
+    } catch {
+      return; // extraction is best-effort
+    }
+
+    const facts = this._parseLearnings(content);
+    for (const f of facts.slice(0, 5)) {
+      if (!f.topic || !f.info) continue;
+      await this._bgMsg('MEMORY_ADD_LEARNED', {
+        topic: String(f.topic).substring(0, 100),
+        info: String(f.info).substring(0, 500),
+        category: f.category
+      }).catch(() => {});
+    }
+  }
+
+  // Parse the extractor's JSON output tolerantly (array, or {facts:[...]}, or embedded)
+  _parseLearnings(content) {
+    if (!content) return [];
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      const match = content.match(/\[[\s\S]*\]/);
+      if (!match) return [];
+      try { parsed = JSON.parse(match[0]); } catch { return []; }
+    }
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.facts)) return parsed.facts;
+    if (Array.isArray(parsed?.learnings)) return parsed.learnings;
+    return [];
   }
 
   // ---- Tool Execution ----
@@ -1083,7 +1239,7 @@ export class AgentCore {
         return this._bgMsg('FILE_OPEN', { fileKey: args.fileKey });
 
       case 'memory_save':
-        return this._bgMsg('MEMORY_ADD_LEARNED', { topic: args.topic, info: args.info });
+        return this._bgMsg('MEMORY_ADD_LEARNED', { topic: args.topic, info: args.info, category: args.category });
 
       case 'memory_recall':
         return this._bgMsg('MEMORY_GET', { query: args.query });
@@ -1091,8 +1247,31 @@ export class AgentCore {
       case 'memory_save_recipe':
         return this._bgMsg('MEMORY_SAVE_RECIPE', { site: args.site, task: args.task, steps: args.steps });
 
+      case 'kb_search':
+        return this._bgMsg('KB_SEARCH', {
+          query: args.query,
+          kbIds: args.kbIds || this.activePersona?.kbIds || null,
+          topK: args.topK || 8
+        });
+
+      case 'skill_use':
+        return this._bgMsg('SKILL_GET', { name: args.name });
+
+      case 'skill_run_macro':
+        return this._bgMsg('SKILL_RUN_MACRO', {
+          name: args.name,
+          tabId: effectiveTabId,
+          adaptive: args.adaptive !== false
+        });
+
       case 'image_save':
         return this._bgMsg('IMAGE_SAVE', { url: args.url });
+
+      case 'http_request':
+        return this._bgMsg('HTTP_REQUEST', {
+          url: args.url, method: args.method, headers: args.headers,
+          body: args.body, timeoutMs: args.timeoutMs
+        });
 
       case 'web_search':
         return this._bgMsg('WEB_SEARCH', {
@@ -1120,8 +1299,32 @@ export class AgentCore {
       case 'file_upload':
         return this._bgMsg('FILE_UPLOAD', { selector: args.selector, fileName: args.fileName, content: args.content, url: args.url, mimeType: args.mimeType, tabId: effectiveTabId });
 
+      case 'file_download':
+        return this._bgMsg('FILE_DOWNLOAD', {
+          fileName: args.fileName, content: args.content, dataUrl: args.dataUrl,
+          url: args.url, mimeType: args.mimeType, saveAs: args.saveAs
+        });
+
+      case 'kb_add_document':
+        return this._bgMsg('KB_ADD_DOC', {
+          kbId: args.kbId, name: args.name, sourceType: 'research',
+          content: args.text, url: args.sourceUrl
+        });
+
+      case 'local_file_list':
+        return this._bgMsg('LOCAL_FILE_LIST', { handleId: args.handleId });
+
+      case 'local_file_read':
+        return this._bgMsg('LOCAL_FILE_READ', { handleId: args.handleId, path: args.path });
+
+      case 'local_file_write':
+        return this._bgMsg('LOCAL_FILE_WRITE', { handleId: args.handleId, path: args.path, content: args.content });
+
+      case 'dialog_suppress_beforeunload':
+        return this._bgMsg('DOM_ACTION', { action: 'suppress_beforeunload', suppress: args.suppress !== false, tabId: effectiveTabId });
+
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, file_upload, quick_report.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_add_document, skill_use, skill_run_macro, image_save, web_search, http_request, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
     }
   }
 
@@ -1212,6 +1415,35 @@ export class AgentCore {
       return { saved: true, site: result?.site, task: result?.task };
     }
 
+    // kb_search: cap chunk and total sizes
+    if (tool === 'kb_search' && Array.isArray(result)) {
+      const out = [];
+      let total = 0;
+      for (const r of result) {
+        const text = (r.text || '').substring(0, 1200);
+        if (total + text.length > 6000) break;
+        total += text.length;
+        out.push({ text, score: r.score, source: `${r.kbName}/${r.docName}${r.page ? ` (page ${r.page})` : ''}`, method: r.method });
+      }
+      return out.length > 0 ? out : { results: [], note: 'No relevant knowledge base content found' };
+    }
+
+    // skill_use: full instructions, capped
+    if (tool === 'skill_use') {
+      if (!result) return { error: 'Skill not found' };
+      const out = { name: result.name, type: result.type, instructions: (result.instructions || '').substring(0, 4000) };
+      if (result.type === 'macro' && Array.isArray(result.steps)) {
+        out.steps = result.steps.slice(0, 30);
+        out.note = 'Call skill_run_macro(name) to execute these steps automatically.';
+      }
+      return out;
+    }
+
+    // skill_run_macro: summary only
+    if (tool === 'skill_run_macro') {
+      return { ran: true, succeeded: result?.succeeded, failed: result?.failed, total: result?.total };
+    }
+
     // dom_query_all: limit elements and truncate text
     if (tool === 'dom_query_all' && result.elements) {
       return {
@@ -1283,6 +1515,25 @@ export class AgentCore {
       return { count: result.count, alerts: (result.alerts || []).slice(-15) };
     }
 
+    // http_request: keep status/headers, cap the body so it doesn't flood context
+    if (tool === 'http_request') {
+      if (result.error) return result;
+      const BODY_CAP = 8000;
+      const body = typeof result.body === 'string' ? result.body : '';
+      return {
+        url: result.url,
+        status: result.status,
+        statusText: result.statusText,
+        ok: result.ok,
+        contentType: result.contentType,
+        headers: result.headers,
+        bytes: result.bytes,
+        binary: result.binary || false,
+        bodyTruncated: result.bodyTruncated || body.length > BODY_CAP,
+        body: result.binary ? result.body : body.slice(0, BODY_CAP)
+      };
+    }
+
     // Generic: if JSON is very large, truncate
     const str = JSON.stringify(result);
     if (str.length > 2000) {
@@ -1304,16 +1555,54 @@ export class AgentCore {
   }
 
   _notify(data) {
+    this._recordEvent(data);
     chrome.runtime.sendMessage({ type: 'AGENT_EVENT', data }).catch((e) => { console.warn('[Agentia] Event notification failed:', e.message); });
   }
 
-  _withSystem(messages) {
+  // Buffer task events into chrome.storage.session so a reopened side panel can
+  // resync a task that ran (or is still running) while the panel was closed.
+  _recordEvent(data) {
+    if (!this._taskEvents) this._taskEvents = [];
+    if (data.type === 'TASK_START') {
+      this._taskEvents = [];
+      this._taskStatus = 'running';
+      this._taskStartedAt = Date.now();
+    }
+    this._taskEvents.push({ ...data, ts: Date.now() });
+    if (this._taskEvents.length > 120) this._taskEvents = this._taskEvents.slice(-120);
+    if (data.type === 'TASK_COMPLETE') this._taskStatus = 'complete';
+    else if (data.type === 'TASK_STOPPED') this._taskStatus = 'stopped';
+    // Always persist state transitions immediately; throttle only mid-task chatter
+    const transition = ['TASK_START', 'TASK_COMPLETE', 'TASK_STOPPED', 'TASK_ERROR'].includes(data.type);
+    this._flushTaskState(transition);
+  }
+
+  _flushTaskState(force = false) {
+    const now = Date.now();
+    if (!force && now - (this._lastFlush || 0) < 400) return; // throttle live writes
+    this._lastFlush = now;
+    try {
+      chrome.storage.session.set({
+        agentia_active_task: {
+          status: this._taskStatus || 'idle',
+          task: this.currentTaskDescription || '',
+          startedAt: this._taskStartedAt || now,
+          updatedAt: now,
+          events: this._taskEvents || []
+        }
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // Called by background.js when a task throws (TASK_ERROR is emitted there)
+  markTaskError(message) {
+    this._taskStatus = 'error';
+    this._recordEvent({ type: 'TASK_ERROR', error: message });
+  }
+
+  async _withSystem(messages) {
     const lastUserMsg = messages.filter(m => m.role === 'user').pop()?.content || '';
-    const fullSystem = buildSystemPrompt(
-      AGENT_SYSTEM_PROMPT_BASE,
-      this.systemPrompt,
-      this._buildMemoryPrompt(lastUserMsg)
-    );
+    const fullSystem = await this._buildFullSystemPrompt(lastUserMsg);
     return [{ role: 'system', content: fullSystem }, ...messages];
   }
 

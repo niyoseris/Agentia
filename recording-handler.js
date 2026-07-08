@@ -83,10 +83,15 @@ export async function replayRecording(recordingId, tabId, adaptive, agentCore, a
     return await agentCore.adaptiveReplay(recording, targetTabId);
   }
 
+  return replayEvents(recording.events, targetTabId);
+}
+
+// Replay a bare event list (used by replayRecording and macro skills)
+export async function replayEvents(events, tabId) {
   const results = [];
-  for (const event of recording.events) {
+  for (const event of events) {
     try {
-      const result = await executeRecordedEvent(event, targetTabId);
+      const result = await executeRecordedEvent(event, tabId);
       results.push({ event, result, success: true });
       await new Promise(r => setTimeout(r, event.delay || 500));
     } catch (err) {

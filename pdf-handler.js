@@ -27,18 +27,34 @@ export async function handlePdfRead(payload, sender) {
 
   if (!pdfUrl) throw new Error('PDF URL bulunamadı');
 
-  const response = await fetch(pdfUrl);
-  if (!response.ok) throw new Error(`PDF indirilemedi (${response.status}): ${pdfUrl}`);
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.includes('pdf') && !pdfUrl.match(/\.pdf($|\?)/i)) {
-    throw new Error('Bu URL bir PDF değil. Yalnızca PDF dosyaları okunabilir.');
+  const result = await extractPdfText({ url: pdfUrl, pages });
+  return {
+    title: decodeURIComponent(pdfUrl.split('/').pop().split('?')[0]),
+    ...result
+  };
+}
+
+// Extract text from a PDF given a URL or raw bytes (Uint8Array).
+// pages: range string like "1-30" / "1,5,7" / "all-full" (every page, no 10-page cap)
+export async function extractPdfText({ url, data, pages }) {
+  let bytes = data;
+  if (!bytes) {
+    if (!url) throw new Error('PDF URL veya veri gerekli');
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`PDF indirilemedi (${response.status}): ${url}`);
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('pdf') && !url.match(/\.pdf($|\?)/i)) {
+      throw new Error('Bu URL bir PDF değil. Yalnızca PDF dosyaları okunabilir.');
+    }
+    bytes = new Uint8Array(await response.arrayBuffer());
   }
-  const arrayBuffer = await response.arrayBuffer();
 
   const pdfjsLib = await getPdfjsLib();
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(arrayBuffer) }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
 
-  const pageRange = parsePageRange(pages, pdf.numPages);
+  const pageRange = pages === 'all-full'
+    ? Array.from({ length: pdf.numPages }, (_, i) => i + 1)
+    : parsePageRange(pages, pdf.numPages);
 
   const extractedPages = [];
   for (const pageNum of pageRange) {
@@ -51,7 +67,6 @@ export async function handlePdfRead(payload, sender) {
   }
 
   return {
-    title: decodeURIComponent(pdfUrl.split('/').pop().split('?')[0]),
     totalPages: pdf.numPages,
     pages: extractedPages,
     charCount: extractedPages.reduce((sum, p) => sum + p.text.length, 0)
