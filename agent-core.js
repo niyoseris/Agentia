@@ -1154,8 +1154,19 @@ ${material}`;
         if (actTabId) this.focusedTabId = actTabId;
         return this._bgMsg('TAB_ACTION', { action: 'activate', tabId: actTabId });
       }
-      case 'tab_get_all':
-        return this._bgMsg('TAB_ACTION', { action: 'get_all' });
+      case 'tab_get_all': {
+        // Return a compact list, marking the tabs Agentia opened and listing them first
+        const allTabs = await this._bgMsg('TAB_ACTION', { action: 'get_all' });
+        const list = Array.isArray(allTabs) ? allTabs : [];
+        const compact = t => ({
+          id: t.id, url: t.url, title: t.title, active: t.active,
+          openedByAgent: this.agentTabIds.has(t.id),
+          focused: t.id === this.focusedTabId
+        });
+        const mine = list.filter(t => this.agentTabIds.has(t.id)).map(compact);
+        const others = list.filter(t => !this.agentTabIds.has(t.id)).map(compact);
+        return { agentTabs: mine, otherTabs: others, focusedTabId: this.focusedTabId };
+      }
       case 'tab_get_active':
         // Return the agent's focused tab, not the user's active tab
         return this._bgMsg('TAB_ACTION', { action: 'get_tab', tabId: this.focusedTabId });
@@ -1345,9 +1356,17 @@ ${material}`;
       return { navigated: result.navigated || true, url: result.url || '' };
     }
     if (tool === 'tab_get_all') {
-      // Array of tabs — trim each to essentials
+      // New shape: { agentTabs, otherTabs, focusedTabId }. Keep all of the agent's
+      // own tabs (it needs their ids), cap the user's other tabs.
+      if (result && Array.isArray(result.agentTabs)) {
+        return {
+          agentTabs: result.agentTabs,
+          otherTabs: (result.otherTabs || []).slice(0, 15),
+          focusedTabId: result.focusedTabId
+        };
+      }
       if (Array.isArray(result)) {
-        return result.slice(0, 10).map(t => ({ tabId: t.id, url: t.url, title: t.title, active: t.active }));
+        return result.slice(0, 15).map(t => ({ tabId: t.id, url: t.url, title: t.title, active: t.active }));
       }
     }
 

@@ -56,7 +56,7 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'tab_get_all',
-      description: 'Get all open tabs',
+      description: 'List open tabs. Returns { agentTabs, otherTabs, focusedTabId } where agentTabs are the tabs YOU opened (each with id, url, title). Use the tabId of any agentTab to act on it — you can work on ANY tab you opened, not just the focused one.',
       parameters: { type: 'object', properties: {} }
     }
   },

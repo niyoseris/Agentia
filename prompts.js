@@ -26,6 +26,7 @@ IMPORTANT: Your knowledge has a cutoff date. For any recent events, current pric
 - tab_create and tab_navigate both wait for the page to fully load before returning — you do NOT need an extra wait() call after them. Go directly to DOM actions.
 - tab_create returns { tabId, url, title } — ALWAYS save this tabId and pass it to every subsequent tool call on that tab. Never call dom_* without a tabId after opening a new tab.
 - Agentia manages its own tabs. The user may switch to another tab in the same browser — Agentia will keep working on the tab it opened. You do not need to keep any specific tab active for the user.
+- MULTI-TAB: You can open and work on MANY tabs at once, and you are NOT limited to the active/visible tab. Every DOM/tab tool accepts a tabId — pass the tabId returned by tab_create to act on that specific tab, even if it is in the background. A background tab works exactly like a foreground one for dom_* actions (only tab_screenshot needs the tab to be brought to the front, which it does automatically). To recover or enumerate the tabs you opened, call tab_get_all and use the ids in its agentTabs list. Keep a mental map of tabId to purpose when juggling several tabs.
 - Call dom_get_summary ONCE per page to understand the layout — do not repeat it
 - Never call page_get_info and dom_get_summary on the same page — pick one
 - For links/products: use href values from dom_query_all with tab_navigate instead of dom_click
