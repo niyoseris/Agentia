@@ -7,6 +7,7 @@ import { MemoryStore } from './memory-store.js';
 import { handleTabAction } from './tab-handler.js';
 import { handleDomAction } from './dom-handler.js';
 import { handleWebSearch } from './search-handler.js';
+import { handleHttpRequest } from './http-handler.js';
 import { handlePdfRead, extractPdfText } from './pdf-handler.js';
 import { handleImageSave } from './image-handler.js';
 import { startRecording, stopRecording, getActiveRecording, setActiveRecording, replayRecording, replayEvents } from './recording-handler.js';
@@ -571,6 +572,12 @@ async function handleMessage(message, sender, sendResponse) {
           cloudBase: payload.cloudBase || agentCore.cloudBase
         });
         sendResponse({ success: true, data: searchResult });
+        break;
+      }
+
+      case 'HTTP_REQUEST': {
+        const httpResult = await handleHttpRequest(payload);
+        sendResponse({ success: true, data: httpResult });
         break;
       }
 

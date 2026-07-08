@@ -415,8 +415,8 @@ export const AGENT_TOOLS = [
           content: { type: 'string', description: 'Initial HTML/text content — can be a skeleton that you will fill in with file_update calls' },
           type: {
             type: 'string',
-            enum: ['html', 'markdown', 'json', 'text'],
-            description: 'Use html for rich visual pages with images and styling'
+            enum: ['html', 'tool', 'markdown', 'json', 'text'],
+            description: 'html = rich visual page/report. tool = interactive page that can make network requests via agentiaHttp() (scanners, API clients). markdown/json/text for plain content.'
           }
         }
       }
@@ -520,6 +520,24 @@ export const AGENT_TOOLS = [
         properties: {
           query: { type: 'string', description: 'Search query, e.g. "best restaurants in Istanbul" or "been.bio personal travel biography"' },
           maxResults: { type: 'number', description: 'Maximum number of results to return (default: 8, max: 15 for DuckDuckGo, 10 for Ollama)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'http_request',
+      description: 'Make a raw HTTP request (GET/POST/PUT/PATCH/DELETE/HEAD) and get the status, headers, and body back. Runs from the extension so there are NO CORS restrictions — you can call APIs, submit forms, fetch JSON/HTML, probe endpoints, or build a scanner. GET is for reading/research; POST/PUT/DELETE change state — use them deliberately. The response body is capped (~1MB read, truncated for you). For authorized security testing follow the active-testing policy.',
+      parameters: {
+        type: 'object',
+        required: ['url'],
+        properties: {
+          url: { type: 'string', description: 'Full http(s) URL, e.g. "https://api.example.com/v1/users" or "http://localhost:3000/health"' },
+          method: { type: 'string', description: 'HTTP method (default GET)', enum: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] },
+          headers: { type: 'object', description: 'Request headers as an object, e.g. {"Authorization": "Bearer x", "Content-Type": "application/json"}' },
+          body: { type: 'string', description: 'Request body for POST/PUT/PATCH (send JSON as a stringified string, and set Content-Type accordingly)' },
+          timeoutMs: { type: 'number', description: 'Timeout in milliseconds (default 30000, max 60000)' }
         }
       }
     }

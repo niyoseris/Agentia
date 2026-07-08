@@ -46,13 +46,31 @@ async function load(silent = false) {
   render(silent);
 }
 
+// Preamble injected into type:'tool' documents so their JS can make HTTP
+// requests through the extension (no CORS) via window.agentiaHttp(url, opts).
+const TOOL_BRIDGE_PREAMBLE = `<script>
+(function(){
+  var _id=0,_p={};
+  window.addEventListener('message',function(e){
+    var m=e.data;
+    if(m&&m.__agentiaHttpResp&&_p[m.id]){_p[m.id](m.result);delete _p[m.id];}
+  });
+  window.agentiaHttp=function(url,opts){
+    return new Promise(function(res){var id=++_id;_p[id]=res;parent.postMessage({__agentiaHttpReq:true,id:id,url:url,opts:opts||{}},'*');});
+  };
+})();
+<\/script>
+`;
+
 function render(isUpdate = false) {
   const area = document.getElementById('content-area');
 
-  if (fileType === 'html') {
-    // ── HTML: Blob URL iframe (bypasses extension CSP — styles/scripts work) ──
+  if (fileType === 'html' || fileType === 'tool') {
+    // ── HTML/tool: Blob URL iframe (bypasses extension CSP — styles/scripts work) ──
+    // 'tool' files additionally get the agentiaHttp bridge preamble.
     if (blobUrl) URL.revokeObjectURL(blobUrl);
-    const blob = new Blob([rawContent], { type: 'text/html;charset=utf-8' });
+    const docContent = fileType === 'tool' ? TOOL_BRIDGE_PREAMBLE + rawContent : rawContent;
+    const blob = new Blob([docContent], { type: 'text/html;charset=utf-8' });
     blobUrl = URL.createObjectURL(blob);
 
     if (htmlIframe && isUpdate) {
@@ -123,8 +141,8 @@ function copyContent() {
 }
 
 function downloadFile() {
-  var ext = fileType === 'html' ? 'html' : fileType === 'json' ? 'json' : fileType === 'markdown' ? 'md' : 'txt';
-  var mime = fileType === 'html' ? 'text/html' : fileType === 'json' ? 'application/json' : 'text/plain';
+  var ext = (fileType === 'html' || fileType === 'tool') ? 'html' : fileType === 'json' ? 'json' : fileType === 'markdown' ? 'md' : 'txt';
+  var mime = (fileType === 'html' || fileType === 'tool') ? 'text/html' : fileType === 'json' ? 'application/json' : 'text/plain';
   var blob = new Blob([rawContent], { type: mime });
   var url = URL.createObjectURL(blob);
   var a = document.createElement('a');
@@ -138,6 +156,25 @@ function downloadFile() {
 window.addEventListener('unload', function() {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer);
   if (blobUrl) URL.revokeObjectURL(blobUrl);
+});
+
+// ── type:'tool' HTTP bridge ──────────────────────────────────────────────────
+// The sandboxed tool iframe (opaque origin) asks the extension to make HTTP
+// requests on its behalf. Only serviced for 'tool' files and only from OUR iframe.
+window.addEventListener('message', function (e) {
+  if (fileType !== 'tool' || !htmlIframe || e.source !== htmlIframe.contentWindow) return;
+  const m = e.data;
+  if (!m || !m.__agentiaHttpReq) return;
+  const opts = m.opts || {};
+  chrome.runtime.sendMessage({
+    type: 'HTTP_REQUEST',
+    payload: { url: m.url, method: opts.method, headers: opts.headers, body: opts.body, timeoutMs: opts.timeoutMs }
+  }, function (response) {
+    const result = (response && response.success)
+      ? response.data
+      : { error: (response && response.error) || (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'İstek başarısız' };
+    try { htmlIframe.contentWindow.postMessage({ __agentiaHttpResp: true, id: m.id, result }, '*'); } catch (err) {}
+  });
 });
 
 // Wire up toolbar buttons

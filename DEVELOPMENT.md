@@ -310,6 +310,21 @@ Agentia, Ollama ile çalışan ajan tabanlı bir Chrome MV3 tarayıcı asistanı
 - `sidepanel`: KB detayında "🔎 Konu Araştır ve Ekle" → hedef kbId'yi göreve gömüp `AGENT_RUN_TASK` başlatır
 - `background.js` `KB_GET_DOC_TEXT`; doküman kartında "Görüntüle" → viewer
 
+## AŞAMA 11: Derin Araştırma + HTTP İstekleri + Ajanın HTML Araçları/Scanner'ı
+
+### 11.1 http_request tool (GET/POST/…)
+- Yeni `http-handler.js` `handleHttpRequest`: AbortController timeout (default 30s, max 60s), gövde 1MB read cap (streaming reader), textual/binary tespiti, headers→obj; hata/timeout throw etmez `{error}` döner
+- `tools.js` `http_request {url!, method, headers, body, timeoutMs}`; `background.js` HTTP_REQUEST case; `agent-core.js` _executeTool case + sanitizer (gövde ≤8KB önizleme) + researchBuffer capture (http_request GET sonuçları da kaynak)
+- SW `<all_urls>` → CORS yok. SSRF/localhost kasıtlı serbest (self-host + yetkili test); yıkıcı kullanım güvenlik politikası kapsamında
+
+### 11.2 Derin & Dinamik (Recursive) Araştırma
+- `prompts.js`: "yeterli olunca dur" yalnızca basit sorularda; yeni "Deep & Dynamic Research" bölümü — sayfayı oku/yorumla, varlık/referans/açık-soru çıkar, hedefe gerekiyorsa dinamik araştır, zincirle (bulgu→soru→arama→sentez), açık-sorular listesi, iterasyon limiti fren. web_search bir başlangıç noktası
+
+### 11.3 Ajanın kendi HTML/JS araçları + scanner
+- `viewer.js`: `type:'tool'` dalı — blob iframe'e `agentiaHttp(url,opts)` preamble'ı eklenir; viewer köprü listener'ı (`e.source===htmlIframe.contentWindow` doğrular, yalnızca 'tool') postMessage → HTTP_REQUEST → geri postMessage. Böylece üretilen scanner HTML'i CORS'suz istek atar
+- `type:'html'` raporları ağ yetkisi ALMAZ (blast-radius sınırlı). `tools.js` file_create type enum'a `tool` + belge
+- `prompts.js`: "Building Interactive Tools & Scanners" — self-contained araç için type:'html'; ağ gerektiren için type:'tool'+agentiaHttp VEYA ajan-orkestralı http_request+file_update
+
 ### 9.6 Altyapı düzeltmeleri
 - **Bug fix:** `runTask` system prompta `this.systemPrompt`'u iki kez ekliyordu (agent-core.js:383)
 - `getSettings()` artık default'ları merge ediyor (yeni ayar anahtarları eski kullanıcılarda undefined kalmaz)

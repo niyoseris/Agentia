@@ -519,9 +519,10 @@ Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
             if (parsed?.url) restoredUrl = parsed.url;
           }
           // Rebuild this.currentResearchBuffer from tool results in message history
-          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && parsed) {
+          if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search', 'http_request'].includes(toolName) && parsed) {
             let snippet = '';
             if (parsed.text) snippet = parsed.text;
+            else if (parsed.body) snippet = parsed.body;
             else if (parsed.content) snippet = parsed.content;
             else if (parsed.results) snippet = parsed.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
             else if (parsed.elements) snippet = parsed.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
@@ -864,9 +865,10 @@ Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
             if (toolName === 'tab_navigate' || toolName === 'tab_create') {
               currentPageUrl = toolResult?.url || '';
             }
-            if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search'].includes(toolName) && toolResult) {
+            if (['dom_get_text', 'dom_extract', 'dom_query_all', 'dom_get_summary', 'page_get_info', 'pdf_read', 'web_search', 'http_request'].includes(toolName) && toolResult) {
               let snippet = '';
               if (toolResult.text) snippet = toolResult.text;
+              else if (toolResult.body && !toolResult.binary) snippet = toolResult.body;
               else if (toolResult.content) snippet = toolResult.content;
               else if (toolResult.results) snippet = toolResult.results.map(r => `[${r.title}](${r.url}) ${r.snippet}`).join('\n');
               else if (toolResult.elements) snippet = toolResult.elements.map(e => [e.text, e.href].filter(Boolean).join(' ')).join('\n');
@@ -884,7 +886,9 @@ Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
                 snippet = parts.join('\n');
               }
               if (snippet.length > 40) {
-                this.currentResearchBuffer.push({ url: currentPageUrl, text: snippet.slice(0, 3000) });
+                // http_request carries its own final URL; other tools use the tracked page URL
+                const srcUrl = (toolName === 'http_request' && toolResult.url) ? toolResult.url : currentPageUrl;
+                this.currentResearchBuffer.push({ url: srcUrl, text: snippet.slice(0, 3000) });
               }
             }
 
@@ -1263,6 +1267,12 @@ ${material}`;
       case 'image_save':
         return this._bgMsg('IMAGE_SAVE', { url: args.url });
 
+      case 'http_request':
+        return this._bgMsg('HTTP_REQUEST', {
+          url: args.url, method: args.method, headers: args.headers,
+          body: args.body, timeoutMs: args.timeoutMs
+        });
+
       case 'web_search':
         return this._bgMsg('WEB_SEARCH', {
           query: args.query,
@@ -1314,7 +1324,7 @@ ${material}`;
         return this._bgMsg('DOM_ACTION', { action: 'suppress_beforeunload', suppress: args.suppress !== false, tabId: effectiveTabId });
 
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_add_document, skill_use, skill_run_macro, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_add_document, skill_use, skill_run_macro, image_save, web_search, http_request, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
     }
   }
 
@@ -1503,6 +1513,25 @@ ${material}`;
     // dialog_get_intercepted: return alert buffer
     if (tool === 'dialog_get_intercepted') {
       return { count: result.count, alerts: (result.alerts || []).slice(-15) };
+    }
+
+    // http_request: keep status/headers, cap the body so it doesn't flood context
+    if (tool === 'http_request') {
+      if (result.error) return result;
+      const BODY_CAP = 8000;
+      const body = typeof result.body === 'string' ? result.body : '';
+      return {
+        url: result.url,
+        status: result.status,
+        statusText: result.statusText,
+        ok: result.ok,
+        contentType: result.contentType,
+        headers: result.headers,
+        bytes: result.bytes,
+        binary: result.binary || false,
+        bodyTruncated: result.bodyTruncated || body.length > BODY_CAP,
+        body: result.binary ? result.body : body.slice(0, BODY_CAP)
+      };
     }
 
     // Generic: if JSON is very large, truncate
