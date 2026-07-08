@@ -270,7 +270,47 @@ Agentia, Ollama ile çalışan ajan tabanlı bir Chrome MV3 tarayıcı asistanı
 - Settings'e "Bilgi Tabanı (RAG)" bölümü: embedding modeli, RAG toggle, top-K
 - Ctrl+1-7 tab kısayolları
 
-### 9.5 Altyapı düzeltmeleri
+### 9.5 Hazır İçerik: 🛡️ Güvenlik Denetçisi modu
+- **Yeni dosya:** `builtins.js` — uzantıyla gelen hazır persona + skill, ilk init'te bir kez seed edilir (`agentia_builtins_version` bayrağıyla korunur; kullanıcı silerse geri gelmez)
+- **Persona "Güvenlik Denetçisi"**: saldırgan gibi düşünüp white-hat gibi raporlayan AppSec denetçisi; yetkilendirme + yıkıcı-test-yasağı kuralları; bağlı `guvenlik-denetimi` skill'i; temperature 0.3
+- **Skill "guvenlik-denetimi"** (prompt): tarayıcı ajanının gözlemleyebildiğine odaklı PASİF metodoloji — güvenlik başlıkları, açığa çıkmış dosyalar (.env/.git/backup), auth/oturum, girdi doğrulama (kavramsal, payload firlatmadan), CORS/TLS/hata ifşası, CVE kontrolü; her bulgu için önem + kanıt + somut kapatma adımları; ilerlemeli HTML rapor çıktısı
+
+### 9.5b İleri sızma testi: yaratıcı + ısrarcı AKTİF test (seed v2)
+- **Skill "sizma-testi-ileri"** (prompt): bilinen teknikleri ilkeller olarak görüp KOMBİNLEYEN, saldırı ağacı kuran, hipotez üretip iterasyonla varyasyonlayan (kodlama/bağlam/vektör değiştirme), tek payload ile yetinmeyen metodoloji. Güvenli PoC doğrulama (XSS canary, boolean/zaman-tabanlı SQLi çıkarımı, OOB kendi dinleyicine), iş-mantığı/race/zincirleme senaryoları. "Yaratıcı Saldırı Senaryoları" rapor bölümü.
+- **Aktif test kapısı (3 katmanlı koruma):**
+  - `settings.activeSecurityTesting` (varsayılan KAPALI) — açılmadıkça yalnızca pasif analiz
+  - `settings.securityAuthorizedTargets` — aktif test SADECE bu alan adlarında
+  - `agent-core._buildSecurityPolicy()` — aktif açıkken system prompta yetkili hedef listesi + yıkıcı-işlem yasağı + PoC-only bloğu enjekte eder; kapalıyken hiçbir şey enjekte edilmez
+- Ayarlar'a "🛡️ Güvenlik Testi" bölümü: aktif test toggle + yetkili hedefler textarea + uyarı metni
+- `seedBuiltins` idempotent + upgrade-farkında (v1→v2: yeni skill'i mevcut personaya bağlar, çift kayıt yok)
+
+## AŞAMA 10: Self-Learn + Yerel Dosya/Dialog + Dayanıklılık + RAG Oto-Araştırma
+
+### 10.1 Genel Self-Learn (sessiz, kategorili)
+- `memory-store.js`: `learned` şemasına `category` (varsayılan `genel`); `addLearned(topic, info, category)`; migration; cap 30→60; `buildMemoryPrompt` kategori-gruplu (`### <kategori>`); `getLearnedCategories()`
+- `agent-core.js`: TASK_COMPLETE sonrası `_extractLearnings()` — ayrı hafif LLM çağrısı (format:json) ile 0–5 genel/taşınabilir bilgi çıkarır, `_parseLearnings` toleranslı parse, sessizce kaydeder
+- `tools.js`: `memory_save`'e `category`; `sidepanel.js`: Memory sekmesinde kategori rozeti + filtre dropdown
+
+### 10.2 Dosya kaydetme (chrome.downloads)
+- `manifest.json`: `downloads` izni geri; `tools.js` `file_download`; `background.js` FILE_DOWNLOAD (metin→data URL, saveAs opsiyonel)
+
+### 10.3 Panel-kapalı dayanıklılık
+- `agent-core.js`: `_notify`→`_recordEvent` ring-buffer (son 120 olay) `chrome.storage.session`'a; durum-geçişlerinde anında flush, ara olaylarda 400ms throttle; `markTaskError`
+- `background.js`: `GET_ACTIVE_TASK`; `sidepanel.js`: açılışta `resyncActiveTask()` — 'running' görevi olaylardan rehidrate edip canlı akışa bağlanır
+- **Offscreen lifeline**: `manifest` `offscreen`; `offscreen.html/js` (runtime port + sessiz WebAudio); `background` ensureOffscreen/closeOffscreen görev ömrüne bağlı. Not: tab/scripting SW'de kalır, offscreen yalnızca ömür uzatıcı
+
+### 10.4 Yerel dosya erişimi (File System Access API)
+- Yeni `local-files.js` (panel context): `pickFiles/pickDirectory`, handle'lar IndexedDB'de, `queryPermission/requestPermission`, `listOp/readOp/writeOp` (20MB cap)
+- `background.js` `requestFromPanel()` köprüsü: LOCAL_FILE_LIST/READ/WRITE → panele forward (panel kapalıysa net hata)
+- `tools.js`: `local_file_list/read/write`; `sidepanel`: Studio'da "📁 Dosyalar" alt paneli (seç/listele/kaldır) + LOCAL_FILE_REQUEST listener
+- **Dialog**: `dialog_suppress_beforeunload` tool → `dom-handler` MAIN-world override ("sayfadan ayrıl?" pop-up'ını bastırır). Native OS dosya-seçici desteklenmez (Chrome sınırı)
+
+### 10.5 RAG oto-araştırma
+- `tools.js` `kb_add_document {kbId, name, text, sourceUrl}` → `KB_ADD_DOC` sourceType `research` → mevcut ingest/embed
+- `sidepanel`: KB detayında "🔎 Konu Araştır ve Ekle" → hedef kbId'yi göreve gömüp `AGENT_RUN_TASK` başlatır
+- `background.js` `KB_GET_DOC_TEXT`; doküman kartında "Görüntüle" → viewer
+
+### 9.6 Altyapı düzeltmeleri
 - **Bug fix:** `runTask` system prompta `this.systemPrompt`'u iki kez ekliyordu (agent-core.js:383)
 - `getSettings()` artık default'ları merge ediyor (yeni ayar anahtarları eski kullanıcılarda undefined kalmaz)
 - `buildSystemPrompt` imzası options objesine geçti; `_withSystem` async oldu

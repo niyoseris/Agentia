@@ -23,6 +23,8 @@ export class AgentCore {
     this.ragEnabled = true;
     this.ragTopK = 5;
     this.ragMaxChars = 4000;
+    this.activeSecurityTesting = false;   // Gates payload-sending security tests
+    this.securityAuthorizedTargets = '';  // Domains the user authorized for active testing
     this._kbContextActive = false; // Raises num_ctx when KB context was injected
     this._visionCache = null; // Cache for model vision capability check
 
@@ -58,7 +60,8 @@ export class AgentCore {
   // Assemble the complete system prompt: base + persona + skills + KB context + memory
   async _buildFullSystemPrompt(userText) {
     const persona = this.activePersona;
-    const personaPrompt = (persona?.personalityPrompt || '').substring(0, 2000);
+    let personaPrompt = (persona?.personalityPrompt || '').substring(0, 2000);
+    personaPrompt += this._buildSecurityPolicy();
 
     // Skills: one line per effective skill (progressive disclosure — full
     // instructions load on demand via skill_use)
@@ -109,6 +112,21 @@ export class AgentCore {
     if (settings.ragEnabled !== undefined) this.ragEnabled = settings.ragEnabled;
     if (settings.ragTopK !== undefined && settings.ragTopK !== null) this.ragTopK = settings.ragTopK;
     if (settings.ragMaxChars !== undefined && settings.ragMaxChars !== null) this.ragMaxChars = settings.ragMaxChars;
+    if (settings.activeSecurityTesting !== undefined) this.activeSecurityTesting = settings.activeSecurityTesting;
+    if (settings.securityAuthorizedTargets !== undefined) this.securityAuthorizedTargets = settings.securityAuthorizedTargets;
+  }
+
+  // Security-testing policy block injected into the system prompt only when the
+  // user has explicitly enabled active testing. Absent = passive analysis only.
+  _buildSecurityPolicy() {
+    if (!this.activeSecurityTesting) return '';
+    const targets = (this.securityAuthorizedTargets || '').trim();
+    return `\n\n## AKTİF GÜVENLİK TESTİ POLİTİKASI (kullanıcı tarafından AÇIK)
+Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
+- Aktif test YALNIZCA şu yetkili hedeflerde yapılabilir: ${targets || '(henüz hedef tanımlanmadı — hedef girilene kadar aktif test YAPMA, yalnızca pasif gözlem)'}
+- Bu kapsam dışındaki hiçbir hedefe payload gönderme, form gönderme veya aktif test yapma; kapsam dışında yalnızca pasif gözlem yap.
+- Yıkıcı işlem YASAK: veri silme/değiştirme, gerçek hesap ele geçirme, DoS/yük testi, başka sunuculara yayılma, kanıt token'ı dışında veri sızdırma.
+- Her aktif test öncesi hedefin bu listede olduğunu ve kullanıcı onayını teyit et. Kanıt amaçlı (PoC) test et — zarar verme.`;
   }
 
   // Resolved API base (local or cloud)
@@ -782,6 +800,8 @@ export class AgentCore {
           summary: result.substring(0, 500),
           success: true
         }).catch((e) => { console.warn('[Agentia] Memory save failed:', e.message); });
+        // Silent self-learn: extract general, portable knowledge from this task
+        this._extractLearnings(taskDescription, result).catch((e) => { console.warn('[Agentia] Self-learn failed:', e.message); });
         return { success: true, result, log, messages };
       }
 
@@ -1029,6 +1049,74 @@ export class AgentCore {
     }
   }
 
+  // ---- Silent Self-Learn ----
+  // After a task, extract 0–5 GENERAL (site-agnostic, reusable) facts and save
+  // them categorized. Runs an independent single LLM call so it never disturbs
+  // the finished task; failures are swallowed.
+  async _extractLearnings(taskDescription, result) {
+    // Combine the task result with collected research for source material
+    const research = (this.currentResearchBuffer || [])
+      .map(r => (typeof r === 'string' ? r : (r?.text || r?.content || '')))
+      .filter(Boolean).join('\n').substring(0, 6000);
+    const material = `Görev: ${taskDescription}\n\nSonuç: ${(result || '').substring(0, 3000)}\n\nAraştırma notları:\n${research}`.trim();
+    if (material.length < 80) return; // nothing meaningful to learn from
+
+    const prompt = `Aşağıdaki tamamlanmış görevden GENEL, tekrar kullanılabilir (siteye/oturuma bağlı OLMAYAN) bilgiler çıkar. Örnek: bir API'nin limiti, bir framework pattern'i, kalıcı bir kullanıcı tercihi, güvenilir bir kaynak. Geçici/tek seferlik ayrıntıları (bugünkü fiyat, tek bir arama sonucu) ATLA.
+
+Yalnızca geçerli JSON dizisi döndür, başka metin yok. En fazla 5 öğe. Öğrenilecek genel bilgi yoksa boş dizi [] döndür.
+Format: [{"topic":"kısa başlık","info":"tek cümle bilgi","category":"teknik|site-kullanımı|kullanıcı-tercihi|araştırma-bulgusu|genel"}]
+
+MATERYAL:
+${material}`;
+
+    let content;
+    try {
+      const res = await this._fetchWithRetry(`${this.apiBase}/api/chat`, {
+        method: 'POST',
+        headers: this._headers(),
+        body: JSON.stringify({
+          model: this.effectiveModel,
+          messages: [{ role: 'user', content: prompt }],
+          stream: false,
+          format: 'json',
+          options: { temperature: 0.2, num_predict: 800, think: false }
+        })
+      }, 2);
+      if (!res.ok) return;
+      const data = await res.json();
+      content = data.message?.content || '';
+    } catch {
+      return; // extraction is best-effort
+    }
+
+    const facts = this._parseLearnings(content);
+    for (const f of facts.slice(0, 5)) {
+      if (!f.topic || !f.info) continue;
+      await this._bgMsg('MEMORY_ADD_LEARNED', {
+        topic: String(f.topic).substring(0, 100),
+        info: String(f.info).substring(0, 500),
+        category: f.category
+      }).catch(() => {});
+    }
+  }
+
+  // Parse the extractor's JSON output tolerantly (array, or {facts:[...]}, or embedded)
+  _parseLearnings(content) {
+    if (!content) return [];
+    let parsed;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      const match = content.match(/\[[\s\S]*\]/);
+      if (!match) return [];
+      try { parsed = JSON.parse(match[0]); } catch { return []; }
+    }
+    if (Array.isArray(parsed)) return parsed;
+    if (Array.isArray(parsed?.facts)) return parsed.facts;
+    if (Array.isArray(parsed?.learnings)) return parsed.learnings;
+    return [];
+  }
+
   // ---- Tool Execution ----
   async _executeTool(tool, args, defaultTabId) {
     // Tab isolation: all tools default to the agent's focused tab, not the user's active tab
@@ -1147,7 +1235,7 @@ export class AgentCore {
         return this._bgMsg('FILE_OPEN', { fileKey: args.fileKey });
 
       case 'memory_save':
-        return this._bgMsg('MEMORY_ADD_LEARNED', { topic: args.topic, info: args.info });
+        return this._bgMsg('MEMORY_ADD_LEARNED', { topic: args.topic, info: args.info, category: args.category });
 
       case 'memory_recall':
         return this._bgMsg('MEMORY_GET', { query: args.query });
@@ -1201,8 +1289,32 @@ export class AgentCore {
       case 'file_upload':
         return this._bgMsg('FILE_UPLOAD', { selector: args.selector, fileName: args.fileName, content: args.content, url: args.url, mimeType: args.mimeType, tabId: effectiveTabId });
 
+      case 'file_download':
+        return this._bgMsg('FILE_DOWNLOAD', {
+          fileName: args.fileName, content: args.content, dataUrl: args.dataUrl,
+          url: args.url, mimeType: args.mimeType, saveAs: args.saveAs
+        });
+
+      case 'kb_add_document':
+        return this._bgMsg('KB_ADD_DOC', {
+          kbId: args.kbId, name: args.name, sourceType: 'research',
+          content: args.text, url: args.sourceUrl
+        });
+
+      case 'local_file_list':
+        return this._bgMsg('LOCAL_FILE_LIST', { handleId: args.handleId });
+
+      case 'local_file_read':
+        return this._bgMsg('LOCAL_FILE_READ', { handleId: args.handleId, path: args.path });
+
+      case 'local_file_write':
+        return this._bgMsg('LOCAL_FILE_WRITE', { handleId: args.handleId, path: args.path, content: args.content });
+
+      case 'dialog_suppress_beforeunload':
+        return this._bgMsg('DOM_ACTION', { action: 'suppress_beforeunload', suppress: args.suppress !== false, tabId: effectiveTabId });
+
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, skill_use, skill_run_macro, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, file_upload, quick_report.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_add_document, skill_use, skill_run_macro, image_save, web_search, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
     }
   }
 
@@ -1414,7 +1526,49 @@ export class AgentCore {
   }
 
   _notify(data) {
+    this._recordEvent(data);
     chrome.runtime.sendMessage({ type: 'AGENT_EVENT', data }).catch((e) => { console.warn('[Agentia] Event notification failed:', e.message); });
+  }
+
+  // Buffer task events into chrome.storage.session so a reopened side panel can
+  // resync a task that ran (or is still running) while the panel was closed.
+  _recordEvent(data) {
+    if (!this._taskEvents) this._taskEvents = [];
+    if (data.type === 'TASK_START') {
+      this._taskEvents = [];
+      this._taskStatus = 'running';
+      this._taskStartedAt = Date.now();
+    }
+    this._taskEvents.push({ ...data, ts: Date.now() });
+    if (this._taskEvents.length > 120) this._taskEvents = this._taskEvents.slice(-120);
+    if (data.type === 'TASK_COMPLETE') this._taskStatus = 'complete';
+    else if (data.type === 'TASK_STOPPED') this._taskStatus = 'stopped';
+    // Always persist state transitions immediately; throttle only mid-task chatter
+    const transition = ['TASK_START', 'TASK_COMPLETE', 'TASK_STOPPED', 'TASK_ERROR'].includes(data.type);
+    this._flushTaskState(transition);
+  }
+
+  _flushTaskState(force = false) {
+    const now = Date.now();
+    if (!force && now - (this._lastFlush || 0) < 400) return; // throttle live writes
+    this._lastFlush = now;
+    try {
+      chrome.storage.session.set({
+        agentia_active_task: {
+          status: this._taskStatus || 'idle',
+          task: this.currentTaskDescription || '',
+          startedAt: this._taskStartedAt || now,
+          updatedAt: now,
+          events: this._taskEvents || []
+        }
+      }).catch(() => {});
+    } catch {}
+  }
+
+  // Called by background.js when a task throws (TASK_ERROR is emitted there)
+  markTaskError(message) {
+    this._taskStatus = 'error';
+    this._recordEvent({ type: 'TASK_ERROR', error: message });
   }
 
   async _withSystem(messages) {

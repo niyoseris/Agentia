@@ -20,6 +20,10 @@ export class MemoryStore {
     };
     // Migrate old data missing recipes
     if (!this.data.recipes) this.data.recipes = [];
+    // Migrate old learned facts missing a category
+    for (const l of this.data.learned) {
+      if (!l.category) l.category = 'genel';
+    }
   }
 
   async save() {
@@ -62,29 +66,39 @@ export class MemoryStore {
   }
 
   // ---- Learned Facts ----
-  // Site-specific tricks, user preferences discovered during tasks
-  async addLearned(topic, info) {
+  // General (site-agnostic) knowledge + tricks + preferences, categorized
+  async addLearned(topic, info, category) {
     if (!this.data) await this.load();
+    const cat = (category || 'genel').toString().substring(0, 40).toLowerCase().trim() || 'genel';
 
     // Avoid duplicates — update existing entry with same topic
     const existing = this.data.learned.findIndex(l => l.topic.toLowerCase() === topic.toLowerCase());
     if (existing >= 0) {
       this.data.learned[existing].info = info;
+      this.data.learned[existing].category = cat;
       this.data.learned[existing].updatedAt = Date.now();
     } else {
       this.data.learned.unshift({
-        id: `lm_${Date.now()}`,
+        id: `lm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
         topic: topic.substring(0, 100),
         info: info.substring(0, 500),
+        category: cat,
         createdAt: Date.now()
       });
     }
 
-    // Keep last 30 learned facts
-    if (this.data.learned.length > 30) {
-      this.data.learned = this.data.learned.slice(0, 30);
+    // Keep last 60 learned facts
+    if (this.data.learned.length > 60) {
+      this.data.learned = this.data.learned.slice(0, 60);
     }
     await this.save();
+  }
+
+  // Distinct categories present in learned facts (for UI filtering)
+  getLearnedCategories() {
+    const cats = new Set();
+    for (const l of (this.data?.learned || [])) cats.add(l.category || 'genel');
+    return [...cats].sort();
   }
 
   // ---- Preferences ----
@@ -195,7 +209,7 @@ export class MemoryStore {
       if (!currentTask) return true; // No task = show all
       const infoKeywords = extractKeywords(l.topic + ' ' + l.info);
       return taskKeywords.some(k => infoKeywords.includes(k));
-    }).slice(0, 10);
+    }).slice(0, 15);
 
     // 2.5 Site Recipes — show all available recipes, LLM decides which is relevant
     const recipes = this.data.recipes || [];
@@ -212,10 +226,16 @@ export class MemoryStore {
     }
 
     if (relevantLearned.length > 0) {
-      const learnedText = relevantLearned
-        .map(l => `- [${l.topic}] ${l.info}`)
+      // Group by category so related knowledge stays together
+      const byCategory = {};
+      for (const l of relevantLearned) {
+        const cat = l.category || 'genel';
+        (byCategory[cat] = byCategory[cat] || []).push(l);
+      }
+      const catBlocks = Object.entries(byCategory)
+        .map(([cat, facts]) => `### ${cat}\n` + facts.map(l => `- [${l.topic}] ${l.info}`).join('\n'))
         .join('\n');
-      const section = `## Learned Facts\n${learnedText}`;
+      const section = `## Öğrenilen Bilgiler (geçmiş görevlerden)\n${catBlocks}`;
       if (totalChars + section.length <= MAX_CHARS) {
         parts.push(section);
         totalChars += section.length;

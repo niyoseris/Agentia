@@ -178,6 +178,19 @@
         <button class="studio-nav-btn active" data-studio="personas">🎭 Kişilikler</button>
         <button class="studio-nav-btn" data-studio="kbs">📚 Bilgi Tabanları</button>
         <button class="studio-nav-btn" data-studio="skills">🛠 Yetenekler</button>
+        <button class="studio-nav-btn" data-studio="files">📁 Dosyalar</button>
+      </div>
+
+      <!-- Local files sub-panel (File System Access API — panel açıkken) -->
+      <div class="studio-panel" id="studio-files">
+        <div style="font-size:12px; color:var(--text3); margin-bottom:8px;">
+          Ajanın okuyup yazabilmesi için bilgisayarınızdan dosya/klasör seçin. Erişim yalnızca bu panel açıkken çalışır; yetkiyi istediğiniz zaman kaldırabilirsiniz.
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:10px;">
+          <button class="btn btn-secondary" id="local-pick-file" style="flex:1;">📄 Dosya Seç</button>
+          <button class="btn btn-secondary" id="local-pick-dir" style="flex:1;">📁 Klasör Seç</button>
+        </div>
+        <div id="local-files-list" style="font-size:13px; color:var(--text2);">Yükleniyor...</div>
       </div>
 
       <!-- Personas sub-panel -->
@@ -252,6 +265,13 @@
               <button class="btn btn-secondary btn-sm" id="kb-save-page-btn">🌐 Bu Sayfayı Kaydet</button>
             </div>
             <div id="kb-add-status" style="font-size:12px; color:var(--text2); margin-top:6px;"></div>
+          </div>
+
+          <div class="settings-section">
+            <div class="settings-title">🔎 Konu Araştır ve Ekle</div>
+            <div style="font-size:12px; color:var(--text3); margin-bottom:6px;">Bir konu yazın; ajan web'de araştırıp bulgularını bu bilgi tabanına ekler.</div>
+            <input type="text" class="form-input" id="kb-research-topic" placeholder="Örn: 2025 KVKK değişiklikleri, React Server Components">
+            <button class="btn btn-primary btn-sm" id="kb-research-btn" style="margin-top:8px;">🔎 Araştır ve Ekle</button>
           </div>
 
           <div class="settings-section">
@@ -456,6 +476,29 @@
         <div class="form-row">
           <label class="form-label">Getirilecek Parça Sayısı (Top-K)</label>
           <input type="number" class="form-input" id="rag-topk" value="5" min="1" max="20" step="1">
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-title">🛡️ Güvenlik Testi</div>
+
+        <div class="toggle-row" style="margin-bottom:4px;">
+          <span class="form-label">Aktif Test (payload gönderme)
+            <span style="color:var(--text3);font-weight:400;display:block;">Kapalıyken yalnızca pasif denetim yapılır</span>
+          </span>
+          <label class="toggle">
+            <input type="checkbox" id="active-security-testing">
+            <div class="toggle-track"></div>
+            <div class="toggle-thumb"></div>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label">Yetkili Hedefler <span style="color:var(--text3);font-weight:400">(her satıra bir alan adı — aktif test SADECE burada yapılır)</span></label>
+          <textarea class="form-textarea" id="security-authorized-targets" placeholder="benimsitem.com&#10;test.benimsitem.com&#10;localhost:3000"></textarea>
+          <div style="font-size:11px; color:var(--text3); margin-top:4px;">
+            ⚠️ Yalnızca sahibi olduğun veya açık yazılı iznin bulunan sistemleri ekle. Yıkıcı test (veri silme, hesap ele geçirme, DoS) her durumda yapılmaz — sadece kanıt amaçlı (PoC) doğrulama.
+          </div>
         </div>
       </div>
 

@@ -20,6 +20,45 @@ export async function handleDomAction(payload, tabId) {
     }
   }
 
+  // beforeunload suppression must run in the page's MAIN world to override the
+  // page's own handlers (isolated-world listeners can't cancel the native prompt).
+  if (action === 'suppress_beforeunload') {
+    try {
+      const res = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: 'MAIN',
+        func: (suppress) => {
+          if (suppress) {
+            if (!window.__agentiaBU) {
+              window.__agentiaBU = { origAdd: window.addEventListener };
+              // Drop any beforeunload listeners added after this point
+              window.addEventListener = function (type, listener, opts) {
+                if (String(type).toLowerCase() === 'beforeunload') return;
+                return window.__agentiaBU.origAdd.call(window, type, listener, opts);
+              };
+              // Neutralize existing/inline handler and confirm-return
+              window.onbeforeunload = null;
+              window.__agentiaBU.capture = (e) => { e.stopImmediatePropagation(); delete e.returnValue; };
+              window.__agentiaBU.origAdd.call(window, 'beforeunload', window.__agentiaBU.capture, true);
+            }
+            return { suppressed: true };
+          } else {
+            if (window.__agentiaBU) {
+              window.addEventListener = window.__agentiaBU.origAdd;
+              try { window.removeEventListener('beforeunload', window.__agentiaBU.capture, true); } catch {}
+              delete window.__agentiaBU;
+            }
+            return { suppressed: false };
+          }
+        },
+        args: [payload.suppress !== false]
+      });
+      return res[0]?.result;
+    } catch (err) {
+      return { error: `beforeunload bastırma başarısız: ${err.message}` };
+    }
+  }
+
   // Try executing with retry — SPA pages can temporarily show as "error page" while loading
   for (let attempt = 0; attempt < 3; attempt++) {
     try {

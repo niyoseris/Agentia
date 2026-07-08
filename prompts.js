@@ -166,7 +166,7 @@ export function buildSystemPrompt(basePrompt, { customPrompt = '', memoryContext
     : '';
 
   const skillsBlock = skillsSection
-    ? `\n## Available Skills\nYou have these user-defined skills. If a skill matches the current task, call skill_use(name) FIRST to load its full instructions, then follow them. For [macro] skills, call skill_run_macro(name) to execute the recorded action sequence.\n${skillsSection}\n`
+    ? `\n## Available Skills\nYou have these user-defined skills. BEFORE starting the task, review the whole list and load EVERY relevant skill — call skill_use(name) for EACH one that applies (not just the first match) and combine their instructions. Many tasks need several skills together (e.g. a passive-recon skill AND an active-testing skill for a security audit); do not stop after loading one. For [macro] skills, call skill_run_macro(name) to execute the recorded action sequence.\n${skillsSection}\n`
     : '';
 
   const kbBlock = kbContext

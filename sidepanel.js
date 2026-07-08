@@ -1,6 +1,7 @@
 // Agentia Side Panel — Main UI Logic
 
 import { addModelToHistory } from './settings-handler.js';
+import { pickFiles, pickDirectory, listHandles, removeHandle, handleLocalFileRequest } from './local-files.js';
 
 const bg = (type, payload) =>
   new Promise((resolve, reject) => {
@@ -56,7 +57,24 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadChatHistory();
   loadPersonaSwitcher();
   getCurrentTab();
+  resyncActiveTask();
 });
+
+// Rehydrate a task that ran (or is still running) while the panel was closed
+async function resyncActiveTask() {
+  try {
+    const active = await bgWithRetry('GET_ACTIVE_TASK', {});
+    if (!active || !active.events || active.events.length === 0) return;
+    // Only rehydrate an in-progress task; completed/stopped/errored ones live in history
+    if (active.status !== 'running') return;
+    switchTab('task');
+    taskLog('info', '↻ Devam eden görev geri yüklendi (panel kapalıyken sürdü)');
+    for (const evt of active.events) handleAgentEvent(evt);
+    setTaskRunning(true); // reconnect to the live event stream
+  } catch (err) {
+    console.warn('[Agentia] Active task resync failed:', err.message);
+  }
+}
 
 async function getCurrentTab() {
   try {
@@ -68,7 +86,7 @@ async function getCurrentTab() {
 }
 
 // ---- Background Event Listener ----
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const { type, data, chunk, status, recording, recordingId } = message;
 
   if (type === 'STREAM_CHUNK') handleStreamChunk(chunk);
@@ -76,18 +94,32 @@ chrome.runtime.onMessage.addListener((message) => {
   if (type === 'RECORDING_STATUS') handleRecordingStatus(status, recording, recordingId);
   if (type === 'PULL_PROGRESS') handlePullProgress(data);
   if (type === 'KB_EVENT') handleKbEvent(data);
+
+  // Service worker asks the panel to perform a File System Access operation
+  if (type === 'LOCAL_FILE_REQUEST') {
+    handleLocalFileRequest(message.op, message.payload || {})
+      .then(result => sendResponse({ success: true, data: result }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true; // keep the channel open for the async response
+  }
 });
 
 // ---- Tab Switching ----
 function setupTabs() {
   document.querySelectorAll('.tab-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-    });
+    btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+}
+
+// Programmatically activate a tab by its data-tab name
+function switchTab(name) {
+  const btn = document.querySelector(`.tab-btn[data-tab="${name}"]`);
+  const panel = document.getElementById(`tab-${name}`);
+  if (!btn || !panel) return;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  panel.classList.add('active');
 }
 
 // ---- Connection / Settings ----
@@ -142,6 +174,8 @@ async function loadSettings() {
     if (s.embeddingModel !== undefined) document.getElementById('embedding-model').value = s.embeddingModel;
     document.getElementById('rag-enabled').checked = s.ragEnabled !== false;
     if (s.ragTopK !== undefined) document.getElementById('rag-topk').value = s.ragTopK;
+    document.getElementById('active-security-testing').checked = !!s.activeSecurityTesting;
+    if (s.securityAuthorizedTargets !== undefined) document.getElementById('security-authorized-targets').value = s.securityAuthorizedTargets;
     updateModelBadge(s.model);
   } catch {}
 }
@@ -213,7 +247,9 @@ function setupSettings() {
       autoRecord: document.getElementById('auto-record').checked,
       embeddingModel: document.getElementById('embedding-model').value.trim(),
       ragEnabled: document.getElementById('rag-enabled').checked,
-      ragTopK: parseInt(document.getElementById('rag-topk').value) || 5
+      ragTopK: parseInt(document.getElementById('rag-topk').value) || 5,
+      activeSecurityTesting: document.getElementById('active-security-testing').checked,
+      securityAuthorizedTargets: document.getElementById('security-authorized-targets').value.trim()
     };
     const settings = addModelToHistory(base, currentModel);
     try {
@@ -1011,17 +1047,35 @@ async function loadMemory() {
   }
 }
 
+let _learnedFilter = '';
+
 function renderMemory(data) {
   // Learned facts
   const learnedEl = document.getElementById('memory-learned-list');
-  if (data.learned && data.learned.length > 0) {
-    learnedEl.innerHTML = data.learned.map(l => `
+  const learned = data.learned || [];
+  if (learned.length > 0) {
+    // Category filter dropdown
+    const cats = [...new Set(learned.map(l => l.category || 'genel'))].sort();
+    if (_learnedFilter && !cats.includes(_learnedFilter)) _learnedFilter = '';
+    const filtered = _learnedFilter ? learned.filter(l => (l.category || 'genel') === _learnedFilter) : learned;
+    const filterHtml = cats.length > 1
+      ? `<select id="learned-cat-filter" style="margin-bottom:8px; padding:4px 6px; background:var(--bg2); color:var(--text1); border:1px solid var(--border); border-radius:6px; font-size:12px;">
+          <option value="">Tüm kategoriler (${learned.length})</option>
+          ${cats.map(c => `<option value="${escHtml(c)}" ${c === _learnedFilter ? 'selected' : ''}>${escHtml(c)}</option>`).join('')}
+        </select>`
+      : '';
+    learnedEl.innerHTML = filterHtml + filtered.map(l => `
       <div style="margin-bottom:8px; padding:8px; background:var(--bg3); border-radius:6px;">
-        <div style="font-weight:600; color:var(--text1);">${escHtml(l.topic)}</div>
+        <div style="display:flex; align-items:center; gap:6px;">
+          <div style="font-weight:600; color:var(--text1);">${escHtml(l.topic)}</div>
+          <span style="font-size:10px; padding:1px 6px; background:var(--bg2); color:var(--text3); border-radius:8px;">${escHtml(l.category || 'genel')}</span>
+        </div>
         <div style="color:var(--text2); margin-top:2px;">${escHtml(l.info)}</div>
         <button data-action="delete-learned" data-id="${escHtml(l.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer; margin-top:4px;">Sil</button>
       </div>
     `).join('');
+    const filterEl = learnedEl.querySelector('#learned-cat-filter');
+    if (filterEl) filterEl.addEventListener('change', () => { _learnedFilter = filterEl.value; renderMemory(data); });
     learnedEl.querySelectorAll('[data-action="delete-learned"]').forEach(btn => {
       btn.addEventListener('click', () => deleteLearned(btn.dataset.id));
     });
@@ -1122,6 +1176,33 @@ let studioSkills = [];
 let activePersonaId = null;
 let currentKbId = null;
 
+async function renderLocalFiles() {
+  const el = document.getElementById('local-files-list');
+  if (!el) return;
+  try {
+    const handles = await listHandles();
+    if (handles.length === 0) {
+      el.innerHTML = '<div style="color:var(--text3);">Henüz yetkili dosya/klasör yok. Yukarıdan seçin.</div>';
+      return;
+    }
+    el.innerHTML = handles.map(h => `
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:6px; padding:8px; background:var(--bg3); border-radius:6px;">
+        <span>${h.kind === 'directory' ? '📁' : '📄'}</span>
+        <div style="flex:1; min-width:0;">
+          <div style="color:var(--text1); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escHtml(h.name)}</div>
+          <div style="font-size:10px; color:var(--text3);">id: ${escHtml(h.id)}</div>
+        </div>
+        <button data-action="remove-local" data-id="${escHtml(h.id)}" style="font-size:11px; color:var(--danger); background:none; border:none; cursor:pointer;">Kaldır</button>
+      </div>
+    `).join('');
+    el.querySelectorAll('[data-action="remove-local"]').forEach(btn => {
+      btn.addEventListener('click', async () => { await removeHandle(btn.dataset.id); renderLocalFiles(); });
+    });
+  } catch (err) {
+    el.textContent = 'Hata: ' + err.message;
+  }
+}
+
 function setupStudio() {
   // Sub-nav switching
   document.querySelectorAll('.studio-nav-btn').forEach(btn => {
@@ -1138,6 +1219,19 @@ function setupStudio() {
     btn.addEventListener('click', () => setTimeout(refreshStudio, 100));
   });
 
+  // Local files
+  document.getElementById('local-pick-file').addEventListener('click', async () => {
+    try { await pickFiles(); await renderLocalFiles(); }
+    catch (err) { if (err.name !== 'AbortError') alert('Dosya seçilemedi: ' + err.message); }
+  });
+  document.getElementById('local-pick-dir').addEventListener('click', async () => {
+    try { await pickDirectory(); await renderLocalFiles(); }
+    catch (err) { if (err.name !== 'AbortError') alert('Klasör seçilemedi: ' + err.message); }
+  });
+  document.querySelectorAll('[data-studio="files"]').forEach(btn => {
+    btn.addEventListener('click', () => renderLocalFiles());
+  });
+
   // Personas
   document.getElementById('persona-new-btn').addEventListener('click', () => openPersonaForm(null));
   document.getElementById('persona-cancel-btn').addEventListener('click', () => {
@@ -1152,6 +1246,7 @@ function setupStudio() {
   document.getElementById('kb-add-text-btn').addEventListener('click', addTextDocToKb);
   document.getElementById('kb-file-input').addEventListener('change', handleKbFileUpload);
   document.getElementById('kb-save-page-btn').addEventListener('click', savePageToKb);
+  document.getElementById('kb-research-btn').addEventListener('click', startKbResearch);
   document.getElementById('kb-search-btn').addEventListener('click', runKbSearchTest);
   document.getElementById('kb-search-input').addEventListener('keydown', (e) => {
     if (e.key === 'Enter') runKbSearchTest();
@@ -1404,12 +1499,13 @@ async function refreshKbDocs() {
       el.innerHTML = '<div style="color:var(--text3);">Henüz doküman yok.</div>';
       return;
     }
-    const typeIcons = { text: '📝', file: '📄', pdf: '📕', page: '🌐' };
+    const typeIcons = { text: '📝', file: '📄', pdf: '📕', page: '🌐', research: '🔎' };
     el.innerHTML = docs.map(d => `
       <div class="studio-card">
         <div class="studio-card-title">${typeIcons[d.sourceType] || '📄'} ${escHtml(d.name)} ${docStatusBadge(d)}</div>
         <div class="studio-card-desc">${d.chunkCount} parça · ${Math.round(d.charCount / 1000)}k karakter${d.sourceUrl ? ' · ' + escHtml(d.sourceUrl.substring(0, 60)) : ''}</div>
         <div class="studio-card-actions">
+          <button data-action="doc-view" data-id="${escHtml(d.id)}">Görüntüle</button>
           <button data-action="doc-delete" data-id="${escHtml(d.id)}" class="danger">Sil</button>
         </div>
       </div>`).join('');
@@ -1419,8 +1515,47 @@ async function refreshKbDocs() {
         await refreshKbDocs();
       });
     });
+    el.querySelectorAll('[data-action="doc-view"]').forEach(btn => {
+      btn.addEventListener('click', () => viewKbDoc(btn.dataset.id));
+    });
   } catch (err) {
     el.textContent = 'Hata: ' + err.message;
+  }
+}
+
+// View a document's stored text in a new viewer tab
+async function viewKbDoc(docId) {
+  try {
+    const { text } = await bg('KB_GET_DOC_TEXT', { id: docId });
+    const html = `<pre style="white-space:pre-wrap; font-family:system-ui; padding:20px; line-height:1.5;">${escHtml(text || '(boş)')}</pre>`;
+    await bg('CREATE_FILE', { name: 'KB Doküman', content: html, type: 'html' });
+  } catch (err) {
+    alert('Doküman görüntülenemedi: ' + err.message);
+  }
+}
+
+// Start an agent task that researches a topic and adds findings to this KB
+async function startKbResearch() {
+  const topicEl = document.getElementById('kb-research-topic');
+  const topic = topicEl.value.trim();
+  if (!topic || !currentKbId) return;
+  await getCurrentTab();
+  if (!currentTabId) { alert('Aktif sekme bulunamadı. Lütfen bir sayfa açın.'); return; }
+
+  const task = `Şu konuyu web'de araştır ve topladığın bilgileri kb_add_document aracıyla şu bilgi tabanına ekle (kbId="${currentKbId}"). Her önemli kaynak/konu için ayrı bir kb_add_document çağrısı yap; name alanına açıklayıcı bir başlık, text alanına özetlenmiş içeriği, sourceUrl alanına kaynağın URL'sini koy. Konu: ${topic}`;
+
+  topicEl.value = '';
+  switchTab('task');
+  taskSessionMessages = null;
+  enterTaskSession(task);
+  setTaskRunning(true);
+  clearTaskLog();
+  taskLog('info', `🔎 Araştırma başlatıldı → "${topic}" bilgi tabanına eklenecek`);
+  try {
+    await bgWithRetry('AGENT_RUN_TASK', { task, tabId: currentTabId, messages: null });
+  } catch (err) {
+    taskLog('error', '✗ Başlatılamadı: ' + err.message);
+    setTaskRunning(false);
   }
 }
 

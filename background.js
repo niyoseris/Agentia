@@ -18,6 +18,7 @@ import { kbStore } from './kb-store.js';
 import { RagEngine } from './rag.js';
 import { personaStore } from './persona-store.js';
 import { skillStore } from './skill-store.js';
+import { seedBuiltins } from './builtins.js';
 
 const OLLAMA_BASE = 'http://localhost:11434';
 let agentCore = null;
@@ -50,6 +51,49 @@ function stopKeepalive() {
   if (keepaliveRefs === 0) chrome.alarms.clear('agentia-keepalive');
 }
 
+// ── Offscreen lifeline: keeps the SW alive during long tasks ──────────────────
+let offscreenCreating = null;
+
+async function ensureOffscreen() {
+  try {
+    if (await chrome.offscreen.hasDocument?.()) return;
+    // Older Chrome: fall back to getContexts check
+    if (!chrome.offscreen.hasDocument) {
+      const ctxs = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+      if (ctxs.length > 0) return;
+    }
+    if (offscreenCreating) { await offscreenCreating; return; }
+    offscreenCreating = chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['AUDIO_PLAYBACK'],
+      justification: 'Uzun süren ajan görevleri sırasında service worker\'ı canlı tutmak için.'
+    });
+    await offscreenCreating;
+    offscreenCreating = null;
+  } catch (e) {
+    offscreenCreating = null;
+    // Already-exists races are benign
+    if (!/single offscreen/i.test(e.message)) console.warn('[Agentia] ensureOffscreen failed:', e.message);
+  }
+}
+
+async function closeOffscreen() {
+  try {
+    const has = chrome.offscreen.hasDocument ? await chrome.offscreen.hasDocument() : true;
+    if (has) await chrome.offscreen.closeDocument();
+  } catch (e) {
+    console.warn('[Agentia] closeOffscreen failed:', e.message);
+  }
+}
+
+// Accept the lifeline port so the offscreen doc keeps the SW's event loop warm
+chrome.runtime.onConnect.addListener((p) => {
+  if (p.name === 'agentia-lifeline') {
+    p.onMessage.addListener(() => {}); // pings reset the SW idle timer
+    p.onDisconnect.addListener(() => {});
+  }
+});
+
 // Initialize on startup
 async function init() {
   agentCore = new AgentCore(OLLAMA_BASE);
@@ -78,6 +122,8 @@ async function init() {
   await personaStore.load();
   await personaStore.ensureDefault();
   await skillStore.load();
+  // Ship built-in presets (Güvenlik Denetçisi persona + methodology skill) once
+  await seedBuiltins(personaStore, skillStore);
   agentCore.personaStore = personaStore;
   agentCore.skillStore = skillStore;
   agentCore.setActivePersona(personaStore.getActive());
@@ -210,10 +256,12 @@ async function handleMessage(message, sender, sendResponse) {
 
         sendResponse({ success: true, data: { started: true } });
         startKeepalive();
+        ensureOffscreen();
 
         agentCore.runTask(payload.task, payload.tabId, payload.messages || null, taskSignal)
           .catch((err) => {
             if (activeTaskId === taskId) {
+              agentCore.markTaskError?.(err.message);
               chrome.runtime.sendMessage({
                 type: 'AGENT_EVENT',
                 data: { type: 'TASK_ERROR', error: err.message }
@@ -225,6 +273,7 @@ async function handleMessage(message, sender, sendResponse) {
               currentTaskController = null;
               activeTaskId = null;
               stopKeepalive();
+              closeOffscreen();
             }
           });
         break;
@@ -236,6 +285,23 @@ async function handleMessage(message, sender, sendResponse) {
           currentTaskController = null;
         }
         sendResponse({ success: true });
+        break;
+      }
+
+      case 'GET_ACTIVE_TASK': {
+        // Let a reopened side panel resync a task that ran while it was closed
+        const sess = await chrome.storage.session.get('agentia_active_task');
+        sendResponse({ success: true, data: sess.agentia_active_task || null });
+        break;
+      }
+
+      // ---- Local files (File System Access API lives in the panel) ----
+      case 'LOCAL_FILE_LIST':
+      case 'LOCAL_FILE_READ':
+      case 'LOCAL_FILE_WRITE': {
+        const op = type === 'LOCAL_FILE_LIST' ? 'list' : (type === 'LOCAL_FILE_READ' ? 'read' : 'write');
+        const result = await requestFromPanel({ type: 'LOCAL_FILE_REQUEST', op, payload });
+        sendResponse({ success: true, data: result });
         break;
       }
 
@@ -557,6 +623,26 @@ async function handleMessage(message, sender, sendResponse) {
         break;
       }
 
+      case 'FILE_DOWNLOAD': {
+        // Save a file to the user's Downloads via chrome.downloads (works without the panel)
+        let downloadUrl = payload.url || payload.dataUrl;
+        if (!downloadUrl && payload.content !== undefined) {
+          const mime = payload.mimeType || 'text/plain';
+          // Encode text as a UTF-8 base64 data URL (btoa can't handle multibyte directly)
+          const b64 = btoa(unescape(encodeURIComponent(payload.content)));
+          downloadUrl = `data:${mime};base64,${b64}`;
+        }
+        if (!downloadUrl) throw new Error('İndirme için content, dataUrl veya url gerekli');
+        const filename = (payload.fileName || 'agentia-dosya.txt').replace(/[\\/:*?"<>|]/g, '_');
+        const downloadId = await chrome.downloads.download({
+          url: downloadUrl,
+          filename,
+          saveAs: !!payload.saveAs
+        });
+        sendResponse({ success: true, data: { downloadId, fileName: filename } });
+        break;
+      }
+
       case 'FILE_UPLOAD': {
         const uploadTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
         if (!uploadTabId) throw new Error('No active tab for file upload');
@@ -632,8 +718,13 @@ async function handleMessage(message, sender, sendResponse) {
       }
 
       case 'MEMORY_ADD_LEARNED': {
-        await memoryStore?.addLearned(payload.topic, payload.info);
+        await memoryStore?.addLearned(payload.topic, payload.info, payload.category);
         sendResponse({ success: true, data: { topic: payload.topic, saved: true } });
+        break;
+      }
+
+      case 'MEMORY_GET_CATEGORIES': {
+        sendResponse({ success: true, data: memoryStore?.getLearnedCategories() || [] });
         break;
       }
 
@@ -714,6 +805,14 @@ async function handleMessage(message, sender, sendResponse) {
       case 'KB_DELETE_DOC': {
         await kbStore.deleteDoc(payload.id);
         sendResponse({ success: true });
+        break;
+      }
+
+      case 'KB_GET_DOC_TEXT': {
+        const chunks = await kbStore.getChunksByDoc(payload.id);
+        chunks.sort((a, b) => (a.seq || 0) - (b.seq || 0));
+        const text = chunks.map(c => c.text).join('\n\n');
+        sendResponse({ success: true, data: { text } });
         break;
       }
 
@@ -864,6 +963,21 @@ async function handleMessage(message, sender, sendResponse) {
     console.error('[Agentia] Error:', type, err);
     sendResponse({ success: false, error: err.message });
   }
+}
+
+// Ask the side panel to perform a File System Access operation and await its
+// reply. Rejects clearly if no panel is open (FS Access needs a window context).
+function requestFromPanel(message) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        return reject(new Error('Yerel dosya erişimi için Agentia panelinin açık olması gerekir.'));
+      }
+      if (!response) return reject(new Error('Panelden yanıt alınamadı (panel açık mı?).'));
+      if (response.success === false) return reject(new Error(response.error || 'Yerel dosya işlemi başarısız'));
+      resolve(response.data);
+    });
+  });
 }
 
 // ---- Knowledge Base ingestion ----

@@ -17,7 +17,11 @@ const DEFAULT_SETTINGS = {
   embeddingModel: 'nomic-embed-text',
   ragEnabled: true,
   ragTopK: 5,
-  ragMaxChars: 4000
+  ragMaxChars: 4000,
+  // Active (payload-sending) security testing — OFF by default, opt-in per user.
+  // Passive audit works without this; active testing is gated to authorized targets.
+  activeSecurityTesting: false,
+  securityAuthorizedTargets: ''
 };
 
 export function addModelToHistory(settings, model) {

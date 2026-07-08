@@ -460,8 +460,9 @@ export const AGENT_TOOLS = [
         type: 'object',
         required: ['topic', 'info'],
         properties: {
-          topic: { type: 'string', description: 'Category or topic, e.g. "Twitter posting", "user language preference", "Amazon product search"' },
-          info: { type: 'string', description: 'The information to remember, e.g. "User prefers Turkish language responses", "Twitter login uses contenteditable"' }
+          topic: { type: 'string', description: 'Short title of the fact, e.g. "Twitter posting", "user language preference", "Amazon product search"' },
+          info: { type: 'string', description: 'The information to remember, e.g. "User prefers Turkish language responses", "Twitter login uses contenteditable"' },
+          category: { type: 'string', description: 'Optional category to group the fact, e.g. "teknik", "site-kullanımı", "kullanıcı-tercihi", "araştırma-bulgusu", "genel"' }
         }
       }
     }
@@ -644,6 +645,100 @@ export const AGENT_TOOLS = [
           url: { type: 'string', description: 'URL to fetch file content from (the system will download it)' },
           mimeType: { type: 'string', description: 'MIME type, e.g. "image/png", "application/pdf". Auto-detected from fileName if omitted.' },
           tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_file_list',
+      description: 'List the local files/folders the user has authorized (via the Files panel), or list the contents of an authorized folder. Requires the Agentia side panel to be open. Call with no handleId to see all authorized items.',
+      parameters: {
+        type: 'object',
+        properties: {
+          handleId: { type: 'string', description: 'Optional id of an authorized folder to list its entries. Omit to list all authorized items.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_file_read',
+      description: 'Read the text content of a local file the user authorized. Requires the side panel open. For an authorized folder, pass the relative path.',
+      parameters: {
+        type: 'object',
+        required: ['handleId'],
+        properties: {
+          handleId: { type: 'string', description: 'Id of the authorized file, or of the folder containing it' },
+          path: { type: 'string', description: 'Relative path inside an authorized folder, e.g. "src/index.js" (only for folder handles)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'local_file_write',
+      description: 'Write text content to a local file the user authorized (overwrites). Requires the side panel open. For an authorized folder, pass the relative path (created if missing).',
+      parameters: {
+        type: 'object',
+        required: ['handleId', 'content'],
+        properties: {
+          handleId: { type: 'string', description: 'Id of the authorized file, or of the folder to write into' },
+          path: { type: 'string', description: 'Relative path inside an authorized folder (only for folder handles)' },
+          content: { type: 'string', description: 'Text content to write' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_add_document',
+      description: 'Add a document to a knowledge base from researched/collected text. Use this after gathering information the user wants stored in RAG. The document is chunked and embedded automatically.',
+      parameters: {
+        type: 'object',
+        required: ['kbId', 'name', 'text'],
+        properties: {
+          kbId: { type: 'string', description: 'Target knowledge base id' },
+          name: { type: 'string', description: 'A descriptive document title' },
+          text: { type: 'string', description: 'The full text content to store' },
+          sourceUrl: { type: 'string', description: 'Optional source URL for attribution' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'dialog_suppress_beforeunload',
+      description: 'Suppress the browser\'s "Are you sure you want to leave this page?" prompt so navigation/automation is not blocked. Call with suppress:true before actions that might trigger it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          suppress: { type: 'boolean', description: 'true to suppress (default), false to restore' },
+          tabId: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'file_download',
+      description: 'Save a file to the user\'s computer (Downloads folder). Use this when the user asks to save/export content to disk — text, JSON, CSV, HTML, or a file from a URL. Provide either text content, a data URL, or a source URL.',
+      parameters: {
+        type: 'object',
+        required: ['fileName'],
+        properties: {
+          fileName: { type: 'string', description: 'File name with extension, e.g. "rapor.md", "veri.csv", "sayfa.html"' },
+          content: { type: 'string', description: 'Text content to save (use this OR dataUrl OR url)' },
+          dataUrl: { type: 'string', description: 'A data: URL to save (for binary content)' },
+          url: { type: 'string', description: 'A remote URL whose file should be downloaded' },
+          mimeType: { type: 'string', description: 'MIME type for text content, e.g. "text/markdown", "application/json". Defaults to text/plain.' },
+          saveAs: { type: 'boolean', description: 'If true, show the OS "Save As" dialog letting the user pick the location (default false = save directly to Downloads)' }
         }
       }
     }
