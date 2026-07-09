@@ -5,6 +5,23 @@ Agentia, Ollama ile çalışan ajan tabanlı bir Chrome MV3 tarayıcı asistanı
 
 ---
 
+## AŞAMA 13: XSS Alert Tespiti — MAIN world + reload-kalıcı (seed v5)
+
+Gözlem: Bir XSS payload'ı gerçekten çalışıp alert() tetikledi, ama `dialog_get_intercepted` count:0 döndürdü — ajan XSS'i kaçırdı.
+
+Kök nedenler:
+1. **Yanlış JS dünyası**: alert override'ı isolated content-script world'de yapılıyordu; XSS ise sayfanın MAIN world'ünde çalışır → override'ı görmez.
+2. **Reload'da siliniyor**: `tab_reload` sonrası override kaybolur; load anında patlayan XSS yakalanmaz.
+
+Çözüm:
+- Yeni `xss-watch.js`: MAIN world'de gerçek alert/confirm/prompt/print'i override eder, tetiklenenleri `sessionStorage`'a yazar (popup göstermez).
+- `background.js`: `XSS_WATCH_ON/GET/OFF` — anlık MAIN-world enjeksiyon + `chrome.scripting.registerContentScripts` ile origin'e **document_start** kalıcı kayıt (reload/navigasyonda scriptlerden ÖNCE kurulur) + görev sonunda otomatik temizlik (unregister).
+- `agent-core.js`: `dialog_alert_intercept`→XSS_WATCH_ON (persist), `dialog_get_intercepted`→XSS_WATCH_GET; sanitizer `{count, xssConfirmed, alerts}` döndürür (count>0 = XSS KANITLANDI).
+- `tools.js`: dialog şemaları güncellendi (persist parametresi, "yakalanan alert = XSS kanıtı").
+- `builtins.js` (pentest skill, seed v5): "önce watch'ı kur (reload'dan önce), sonra payload/yükle, sonra oku; alert yoksa bile payload'ın DOM'a çalıştırılabilir düşüp düşmediğini doğrula".
+
+---
+
 ## AŞAMA 12: Kapsamlı Güvenlik Testi İyileştirmeleri (seed v4)
 
 Gözlem: Bir XSS tarama görevinde ajan KB'deki geniş payload listesini kullanamadı (kb_search sadece top-K getirdi, yanlış chunk'lar geldi) ve birkaç payload deneyip "güvenli" dedi; rapor da otomatik-fallback ile üretildi.

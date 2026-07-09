@@ -622,13 +622,12 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'dialog_alert_intercept',
-      description: 'Enable alert/confirm/prompt interception on the page. Once activated, browser alert() dialogs are automatically suppressed (auto-accepted), confirm() returns true, and prompt() returns an empty string. The intercepted calls are recorded and can be retrieved. Use this BEFORE performing actions that might trigger unwanted browser dialogs. Call again with intercept:false to restore original behavior.',
+      description: 'Arm an alert/confirm/prompt WATCH on the page — essential for XSS testing. It overrides the page\'s REAL window.alert (in the page\'s own JS world) and records every fired dialog, WITHOUT showing a popup. It persists across reloads/navigation on the same origin (re-installed before the page\'s scripts run), so an XSS that fires on page load is still caught. Arm this BEFORE typing a payload or reloading. Then read results with dialog_get_intercepted — a captured alert is PROOF the XSS executed. Call with intercept:false to stop watching.',
       parameters: {
         type: 'object',
         properties: {
-          intercept: { type: 'boolean', description: 'true = intercept and suppress dialogs, false = restore original behavior. Default: true.' },
-          autoConfirm: { type: 'boolean', description: 'Auto-accept confirm() dialogs. Default: true.' },
-          autoPrompt: { type: 'string', description: 'Value to auto-return for prompt() dialogs. Default: empty string.' },
+          intercept: { type: 'boolean', description: 'true = start watching (default), false = stop watching and clear.' },
+          persist: { type: 'boolean', description: 'Keep watching across reloads/navigation on this origin (default true). Needed to catch XSS that fires on page load.' },
           tabId: { type: 'number' }
         }
       }
@@ -638,7 +637,7 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'dialog_get_intercepted',
-      description: 'Get the list of browser alert/confirm/prompt calls that were intercepted since dialog_alert_intercept was enabled. Returns the type (alert/confirm/prompt), message text, and what response was auto-given.',
+      description: 'Read the alert/confirm/prompt dialogs captured since dialog_alert_intercept was armed (including ones fired after a reload). Returns { count, xssConfirmed, alerts:[{type,message,url}] }. If count > 0, an XSS payload actually executed — record it as a CONFIRMED finding with the message as evidence.',
       parameters: {
         type: 'object',
         properties: {

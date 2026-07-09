@@ -5,7 +5,7 @@
 const SEED_FLAG_KEY = 'agentia_builtins_version';
 const SEED_PERSONA_FP_KEY = 'agentia_builtins_security_fp'; // fingerprint of last-written built-in prompt
 const SEED_SKILLS_FP_KEY = 'agentia_builtins_skills_fp';    // per-skill instruction fingerprints
-const SEED_VERSION = 4;
+const SEED_VERSION = 5;
 
 // Small stable string hash (djb2) — used to detect whether the user has edited
 // the built-in persona prompt since we last wrote it.
@@ -138,7 +138,8 @@ Kullanıcının bilgi tabanında payload listeleri, kontrol listeleri, metodoloj
    - Cache poisoning / header injection / host header manipülasyonu
    - SSRF → iç servis/metadata erişimi (yalnızca kendi altyapında, kanıt amaçlı)
 3. **Aktif ama GÜVENLİ doğrulama** (politika açıksa):
-   - XSS: zararsız benzersiz "canary" (ör. rastgele bir işaret dizisi) enjekte et; yansıma/çalışma bağlamını gözle. Gerçek kötücül JS çalıştırma.
+   - XSS: **ÖNCE dialog_alert_intercept ile alert-watch'ı KUR** (persist açık). Bu, sayfanın gerçek alert()'ini yakalar ve reload'da hayatta kalır. SONRA payload'ı enjekte et / sayfayı yükle. Ardından dialog_get_intercepted ile oku: count>0 ise (xssConfirmed) XSS GERÇEKTEN çalıştı — bunu KANITLANMIŞ bulgu olarak yaz (message'ı kanıt koy). Reload gerektiren stored/load-time XSS için watch'ı reload'dan ÖNCE kurmuş olmalısın.
+   - Alert tetiklenmese bile: payload'ın DOM'a çalıştırılabilir olarak DÜŞÜP düşmediğini doğrula (enjekte edilen element/attribute DOM'da var mı, yoksa sanitize mi edildi — dom_query_all/dom_extract ile bak). "Sanitize edildi" ile "sink'e hiç ulaşmadı" farklıdır.
    - SQLi: boolean/zaman-tabanlı çıkarım ile VARLIĞINI kanıtla; veri çekme/silme yapma, tabloya dokunma.
    - SSRF/OOB: yalnızca KENDİ kontrolündeki bir dinleyiciye geri-çağrı ile kanıtla.
    - Auth/oturum: token öngörülebilirliğini, çerez bayraklarını, oturum sabitleme (fixation) olasılığını gözlemle; başkasının hesabına girme.

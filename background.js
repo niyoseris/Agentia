@@ -275,6 +275,8 @@ async function handleMessage(message, sender, sendResponse) {
               activeTaskId = null;
               stopKeepalive();
               closeOffscreen();
+              // Stop watching page loads once the task is over
+              unregisterAllXssWatch();
             }
           });
         break;
@@ -578,6 +580,29 @@ async function handleMessage(message, sender, sendResponse) {
       case 'HTTP_REQUEST': {
         const httpResult = await handleHttpRequest(payload);
         sendResponse({ success: true, data: httpResult });
+        break;
+      }
+
+      case 'XSS_WATCH_ON': {
+        const wTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        if (!wTabId) throw new Error('XSS izleme için aktif tab yok');
+        const res = await armXssWatch(wTabId, payload.persist !== false);
+        sendResponse({ success: true, data: res });
+        break;
+      }
+
+      case 'XSS_WATCH_GET': {
+        const gTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        if (!gTabId) throw new Error('XSS izleme için aktif tab yok');
+        const alerts = await readXssAlerts(gTabId, payload.clear !== false);
+        sendResponse({ success: true, data: { count: alerts.length, alerts } });
+        break;
+      }
+
+      case 'XSS_WATCH_OFF': {
+        const oTabId = payload.tabId || sender.tab?.id || await getActiveTabId();
+        await disarmXssWatch(oTabId);
+        sendResponse({ success: true });
         break;
       }
 
@@ -997,6 +1022,83 @@ function requestFromPanel(message) {
       resolve(response.data);
     });
   });
+}
+
+// ── XSS alert watch (MAIN world, reload-persistent) ──────────────────────────
+function _xssScriptId(origin) {
+  return 'agentia-xss-' + origin.replace(/[^a-z0-9]/gi, '_');
+}
+
+// Arm the interceptor: inject into the current page now, and (if persist)
+// register a document_start MAIN-world content script for this origin so the
+// interceptor is present BEFORE page scripts on every reload/navigation.
+async function armXssWatch(tabId, persist) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const origin = (() => { try { return new URL(tab?.url || '').origin; } catch { return null; } })();
+
+  // Immediate injection for the already-loaded page
+  await chrome.scripting.executeScript({
+    target: { tabId }, files: ['xss-watch.js'], world: 'MAIN'
+  }).catch((e) => console.warn('[Agentia] XSS watch inject failed:', e.message));
+
+  let persisted = false;
+  if (persist && origin && /^https?:/.test(origin)) {
+    const id = _xssScriptId(origin);
+    try {
+      const existing = await chrome.scripting.getRegisteredContentScripts({ ids: [id] }).catch(() => []);
+      if (existing.length === 0) {
+        await chrome.scripting.registerContentScripts([{
+          id,
+          matches: [origin + '/*'],
+          js: ['xss-watch.js'],
+          runAt: 'document_start',
+          world: 'MAIN',
+          allFrames: true
+        }]);
+      }
+      persisted = true;
+    } catch (e) {
+      console.warn('[Agentia] XSS watch register failed:', e.message);
+    }
+  }
+  return { armed: true, origin, persisted };
+}
+
+async function readXssAlerts(tabId, clear) {
+  const result = await chrome.scripting.executeScript({
+    target: { tabId }, world: 'MAIN',
+    func: (doClear) => {
+      try {
+        const arr = JSON.parse(sessionStorage.getItem('__agentia_alerts') || '[]');
+        if (doClear) sessionStorage.removeItem('__agentia_alerts');
+        return arr;
+      } catch { return []; }
+    },
+    args: [!!clear]
+  }).catch(() => [{ result: [] }]);
+  return result[0]?.result || [];
+}
+
+async function disarmXssWatch(tabId) {
+  // Clear the buffer in the tab
+  if (tabId) {
+    await chrome.scripting.executeScript({
+      target: { tabId }, world: 'MAIN',
+      func: () => { try { sessionStorage.removeItem('__agentia_alerts'); } catch {} }
+    }).catch(() => {});
+  }
+  // Unregister ALL agentia XSS content scripts (task cleanup)
+  await unregisterAllXssWatch();
+}
+
+async function unregisterAllXssWatch() {
+  try {
+    const scripts = await chrome.scripting.getRegisteredContentScripts().catch(() => []);
+    const ids = scripts.filter(s => s.id.startsWith('agentia-xss-')).map(s => s.id);
+    if (ids.length > 0) await chrome.scripting.unregisterContentScripts({ ids });
+  } catch (e) {
+    console.warn('[Agentia] XSS watch cleanup failed:', e.message);
+  }
 }
 
 // ---- Knowledge Base ingestion ----

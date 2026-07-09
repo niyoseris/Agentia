@@ -1314,9 +1314,13 @@ ${material}`;
       case 'dialog_fill':
         return this._bgMsg('DOM_ACTION', { action: 'fill_dialog', index: args.index, fields: args.fields, tabId: effectiveTabId });
       case 'dialog_alert_intercept':
-        return this._bgMsg('DOM_ACTION', { action: 'alert_intercept', intercept: args.intercept, autoConfirm: args.autoConfirm, autoPrompt: args.autoPrompt, tabId: effectiveTabId });
+        // MAIN-world + reload-persistent alert watch (catches XSS-fired alerts)
+        if (args.intercept === false) {
+          return this._bgMsg('XSS_WATCH_OFF', { tabId: effectiveTabId });
+        }
+        return this._bgMsg('XSS_WATCH_ON', { tabId: effectiveTabId, persist: args.persist });
       case 'dialog_get_intercepted':
-        return this._bgMsg('DOM_ACTION', { action: 'get_alert_buffer', clear: args.clear, tabId: effectiveTabId });
+        return this._bgMsg('XSS_WATCH_GET', { tabId: effectiveTabId, clear: args.clear });
       case 'file_upload':
         return this._bgMsg('FILE_UPLOAD', { selector: args.selector, fileName: args.fileName, content: args.content, url: args.url, mimeType: args.mimeType, tabId: effectiveTabId });
 
@@ -1550,9 +1554,17 @@ ${material}`;
       return { filled: result.filled?.map(f => ({ field: f.field, method: f.method })) || [], count: result.count };
     }
 
-    // dialog_get_intercepted: return alert buffer
+    // dialog_get_intercepted: return captured dialogs. A non-empty list is PROOF
+    // that an alert/confirm/prompt fired — i.e. an XSS payload executed.
     if (tool === 'dialog_get_intercepted') {
-      return { count: result.count, alerts: (result.alerts || []).slice(-15) };
+      const alerts = (result.alerts || []).slice(-20).map(a => ({
+        type: a.type, message: (a.message || '').substring(0, 300), url: a.url
+      }));
+      return {
+        count: result.count || 0,
+        xssConfirmed: (result.count || 0) > 0,
+        alerts
+      };
     }
 
     // http_request: keep status/headers, cap the body so it doesn't flood context
