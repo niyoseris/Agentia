@@ -4,7 +4,8 @@
 
 const SEED_FLAG_KEY = 'agentia_builtins_version';
 const SEED_PERSONA_FP_KEY = 'agentia_builtins_security_fp'; // fingerprint of last-written built-in prompt
-const SEED_VERSION = 3;
+const SEED_SKILLS_FP_KEY = 'agentia_builtins_skills_fp';    // per-skill instruction fingerprints
+const SEED_VERSION = 4;
 
 // Small stable string hash (djb2) — used to detect whether the user has edited
 // the built-in persona prompt since we last wrote it.
@@ -110,11 +111,20 @@ const PENTEST_SKILL = {
 - Aktif test (payload gönderme) YALNIZCA sistem promptunda "AKTİF GÜVENLİK TESTİ POLİTİKASI" bloğu varsa ve hedef oradaki yetkili listede ise yapılır. Blok yoksa/hedef listede değilse: sadece PASİF analiz yap, payload gönderme.
 - Her aktif teste başlamadan hedefi ve kullanıcı onayını teyit et.
 - Yıkıcı işlem YASAK: veri silme/değiştirme, gerçek hesap ele geçirme, DoS/yük/brute-force saldırısı, başka sunuculara yayılma, kanıt token'ı dışında veri sızdırma. Kanıtla, zarar verme.
+- KALICI İZ: Kalıcı (stored) payload gönderdiğin her yeri (form, alan, gönderilen değer) NOT AL. Rapor sonunda "Bırakılan Payload'lar & Temizlik" bölümünde listele ve kullanıcıya nasıl temizleyeceğini söyle.
 
 ## FELSEFE — tek payload ile durma
 Kötü niyetli ama YARATICI bir saldırgan gibi düşün: literatürdeki tekil zafiyetleri EZBER kontrol listesi gibi değil,
 BİRLEŞTİRİLEBİLİR ilkeller (primitives) olarak gör. Asıl değer, zayıflıkları ZİNCİRLEYİP özgün senaryolar kurmakta.
 Bir test "temiz" döndüğünde bırakma: bağlamı değiştir, kodlamayı değiştir, başka vektör dene, iki küçük kusuru birleştir.
+BİRKAÇ payload deneyip "güvenli" DEME. Bir bağlamı ancak o bağlama uygun payload kategorilerini TÜKETTİKTEN sonra temiz sayabilirsin.
+
+## BİLGİ TABANINDAKİ PAYLOAD/REFERANSLARI TAM KULLAN
+Kullanıcının bilgi tabanında payload listeleri, kontrol listeleri, metodoloji dokümanları olabilir. kb_search yalnızca birkaç parça getirir — TAM listeyi almaz.
+- ÖNCE kb_list_documents ile ilgili dokümanı bul (ör. "XSS payload", "SQLi", "SSRF" adlı doküman).
+- SONRA kb_get_document ile o dokümanın TAMAMINI oku.
+- Listedeki payload'ları kategori kategori (HTML / attribute / JS / URL-protocol / SVG / fragment-DOM / encoding-bypass / filter-bypass / WAF-bypass / AngularJS-CSTI / meta-og:url / host-header / CRLF / open-redirect) SİSTEMATİK dene; her payload'ı doğru BAĞLAMA yerleştir.
+- Bir "Kapsam Tablosu" tut: kategori → denenen sayısı → sonuç. Hedefin teknoloji yığınına (framework) uygun tüm kategoriler denenmeden bitirme.
 
 ## DÖNGÜ (her hedef için tekrarla)
 1. **Saldırı yüzeyi haritası + saldırı ağacı**: tüm giriş noktalarını (form, URL param, header, çerez, upload, API, gizli endpoint, JS'teki client-side rotalar) ve güven sınırlarını çıkar. Bir "saldırı ağacı" kur: hedef → yollar → gerekli ilkeller.
@@ -136,10 +146,22 @@ Bir test "temiz" döndüğünde bırakma: bağlamı değiştir, kodlamayı deği
 5. **Zincirle**: tek tek düşük etkili bulguları birleştirip gerçek etkiyi (kavramsal olarak) göster. Örn. bilgi ifşası + IDOR = hesap devralma yolu.
 6. **Kapsamı takip et**: her adımda hedefin yetkili listede olduğunu doğrula; kapsam dışına ASLA çıkma.
 
-## RAPORLAMA
-Her bulgu/zincir için: Başlık, Önem (Kritik/Yüksek/Orta/Düşük), Saldırı Zinciri (adım adım), Kanıt (gözlem/canary/çıkarım), Etki (kavramsal), SOMUT Kapatma Adımları, Doğrulama.
-Özgün/kombinasyon senaryolarını ayrı bir "Yaratıcı Saldırı Senaryoları" bölümünde topla — hangi ilkelleri nasıl birleştirdiğini açıkla ki savunma da bütünsel olsun.
-Sonucu ilerlemeli tek dosya HTML rapor olarak üret (file_create → file_update → file_open), yönetici özeti + önceliklendirilmiş aksiyon listesiyle başlat.`
+## STATİK/SPA SİTELERDE DOM XSS — KAYNAK KODU OKU
+Sunucu girdiyi yansıtmıyorsa (Astro/Next/SPA gibi statik veya client-render) reflected XSS yok DEMEK DEĞİLDİR — asıl risk DOM-based XSS'tir.
+- Sayfadaki JS dosyalarını http_request ile ÇEK ve OKU. Şu source→sink akışlarını ara: location.hash/search/href → innerHTML/outerHTML/document.write/insertAdjacentHTML/eval/setTimeout; postMessage → sink; localStorage/sessionStorage → sink.
+- Fragment (#) payload'ları sunucuya gitmez, tarayıcı/JS işler — mutlaka test et: URL#<img src=x onerror=...>, #<svg onload=...>.
+- Yorum/arama sonuçlarının innerHTML mı textContent mı ile basıldığını KODDAN doğrula.
+
+## RAPORLAMA ( zorunlu — otomatik özete BIRAKMA)
+Raporu SEN yaz: file_create ile iskele kur, her önemli bulguda file_update ile GÜNCELLE (içeriği kendin biriktir), sonda file_open. Otomatik fallback rapora güvenme.
+Yapı:
+- Yönetici Özeti + Önceliklendirilmiş Aksiyon Listesi (en başta).
+- Her bulgu: Başlık · Önem (Kritik/Yüksek/Orta/Düşük/Bilgi) · Kanıt (gözlem/canary/çıkarım) · Saldırı Zinciri · Etki · SOMUT Kapatma Adımları · Doğrulama.
+- "Test Kapsamı" tablosu: hangi giriş noktasında hangi payload KATEGORİLERİNİ denedin ve sonuç (temiz/zafiyetli/doğrulanamadı). Böylece neyin test edildiği şeffaf olur.
+- "Doğrulanamayan Bulgular": moderasyon/asenkron nedeniyle çalışması teyit edilemeyen (ör. onay bekleyen yoruma gömülen stored XSS) durumları AYRI işaretle — "potansiyel, admin panelinde render doğrulanmalı" de.
+- "Bırakılan Payload'lar & Temizlik": teste bıraktığın kalıcı payload'ları (nerede, hangi değer) listele ve temizleme adımlarını ver.
+- "Yaratıcı/Kombinasyon Senaryoları": zincirlediğin özgün senaryolar.
+Hiçbir zafiyet bulamadıysan da bunu POZİTİF bir bulgu olarak yaz (hangi savunmalar işe yaradı: SSG, güvenli DOM render, moderasyon, Turnstile, CSP) + yine de eksik güvenlik başlıkları vb. varsa raporla.`
 };
 
 // ── Security Auditor persona ─────────────────────────────────────────────────
@@ -175,13 +197,24 @@ export async function seedBuiltins(personaStore, skillStore) {
   if ((stored[SEED_FLAG_KEY] || 0) >= SEED_VERSION) return false;
 
   try {
-    // Ensure both skills exist (create missing ones by name)
+    // Ensure both skills exist; on upgrade, refresh their instructions/description
+    // to the current built-in — but only if the user hasn't hand-edited them
+    // (per-skill fingerprint of the instructions we last wrote).
+    const skillsFp = (await chrome.storage.local.get(SEED_SKILLS_FP_KEY))[SEED_SKILLS_FP_KEY] || {};
     const skillIds = [];
     for (const def of [SECURITY_SKILL, PENTEST_SKILL]) {
       let skill = skillStore.getByName(def.name);
-      if (!skill) skill = await skillStore.upsert({ ...def });
-      if (skill) skillIds.push(skill.id);
+      if (!skill) {
+        skill = await skillStore.upsert({ ...def });
+      } else {
+        const unedited = !skillsFp[def.name] || skillsFp[def.name] === hashStr(skill.instructions || '');
+        if (unedited) {
+          skill = await skillStore.upsert({ ...skill, description: def.description, instructions: def.instructions });
+        }
+      }
+      if (skill) { skillIds.push(skill.id); skillsFp[def.name] = hashStr(skill.instructions || ''); }
     }
+    await chrome.storage.local.set({ [SEED_SKILLS_FP_KEY]: skillsFp });
 
     const currentFp = hashStr(SECURITY_PERSONA.personalityPrompt);
 

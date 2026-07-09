@@ -729,10 +729,14 @@ Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
         this._notify({ type: 'TASK_COMPLETE', result, messages, success: true });
 
         // ── Auto-save recipe if task involved DOM-heavy interaction on a site ──
+        // Skip for security testing: "how to submit XSS payloads" is not a useful
+        // recipe and replaying it would re-plant payloads on the target.
+        const isSecurityContext = this.activeSecurityTesting ||
+          /güvenlik|security|denetçi|pentest|sızma/i.test(this.activePersona?.name || '');
         const domSteps = log.filter(e => e.type === 'tool' && e.tool?.startsWith('dom_'));
         const navSteps = log.filter(e => e.type === 'tool' && (e.tool === 'tab_navigate' || e.tool === 'tab_create'));
         const toolResults = log.filter(e => e.type === 'tool_result');
-        if (domSteps.length >= 2) {
+        if (!isSecurityContext && domSteps.length >= 2) {
           let site = '';
           for (const ns of navSteps) {
             const url = ns.args?.url || '';
@@ -815,7 +819,7 @@ Payload gönderen aktif güvenlik testi ETKİN. Kurallar mutlaktır:
         'tab_get_active', 'tab_get_all', 'tab_screenshot',
         'dom_get_text', 'dom_get_value', 'dom_exists', 'dom_query_all',
         'dom_get_summary', 'dom_extract', 'page_get_info', 'pdf_read',
-        'memory_recall', 'web_search', 'kb_search', 'skill_use',
+        'memory_recall', 'web_search', 'kb_search', 'kb_list_documents', 'kb_get_document', 'skill_use',
         'dialog_detect', 'dialog_get_intercepted'
       ]);
 
@@ -1265,6 +1269,12 @@ ${material}`;
           topK: args.topK || 8
         });
 
+      case 'kb_list_documents':
+        return this._bgMsg(args.kbId ? 'KB_LIST_DOCS' : 'KB_LIST_ALL_DOCS', { kbId: args.kbId });
+
+      case 'kb_get_document':
+        return this._bgMsg('KB_GET_DOC_TEXT', { id: args.docId });
+
       case 'skill_use':
         return this._bgMsg('SKILL_GET', { name: args.name });
 
@@ -1335,7 +1345,7 @@ ${material}`;
         return this._bgMsg('DOM_ACTION', { action: 'suppress_beforeunload', suppress: args.suppress !== false, tabId: effectiveTabId });
 
       default:
-        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_add_document, skill_use, skill_run_macro, image_save, web_search, http_request, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
+        throw new Error(`Unknown tool: "${tool}". Available tools: tab_create, tab_close, tab_navigate, tab_screenshot, tab_get_active, tab_get_all, tab_reload, tab_back, tab_forward, dom_click, dom_type, dom_clear, dom_scroll, dom_hover, dom_select, dom_keypress, dom_get_text, dom_exists, dom_query_all, dom_get_summary, dom_extract, page_get_info, pdf_read, wait, recording_start, recording_stop, replay, create_file, file_create, file_update, file_open, memory_save, memory_recall, memory_save_recipe, kb_search, kb_list_documents, kb_get_document, kb_add_document, skill_use, skill_run_macro, image_save, web_search, http_request, dialog_detect, dialog_dismiss, dialog_accept, dialog_fill, dialog_alert_intercept, dialog_get_intercepted, dialog_suppress_beforeunload, file_upload, file_download, local_file_list, local_file_read, local_file_write, quick_report.`);
     }
   }
 
@@ -1445,6 +1455,17 @@ ${material}`;
         out.push({ text, score: r.score, source: `${r.kbName}/${r.docName}${r.page ? ` (page ${r.page})` : ''}`, method: r.method });
       }
       return out.length > 0 ? out : { results: [], note: 'No relevant knowledge base content found' };
+    }
+
+    // kb_get_document: return the full document text, capped generously (~40KB)
+    // so the agent can iterate through a complete reference/payload list
+    if (tool === 'kb_get_document' && result && typeof result.text === 'string') {
+      const CAP = 40000;
+      return {
+        text: result.text.substring(0, CAP),
+        truncated: result.text.length > CAP,
+        length: result.text.length
+      };
     }
 
     // skill_use: full instructions, capped

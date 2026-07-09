@@ -776,13 +776,40 @@ export const AGENT_TOOLS = [
     type: 'function',
     function: {
       name: 'kb_search',
-      description: 'Search the user\'s knowledge bases (uploaded documents, saved pages, notes) for relevant information. Use this when the task may relate to the user\'s own documents, or when the injected Knowledge Base Context is insufficient. Returns text excerpts with source attribution and relevance scores.',
+      description: 'SEMANTIC search over the user\'s knowledge bases — returns only the top-K most relevant EXCERPTS, not whole documents. Use it to find relevant snippets. If you need the COMPLETE content of a document (e.g. a full payload list, a full checklist, an entire reference to iterate through), use kb_get_document instead — kb_search will only give you a partial slice.',
       parameters: {
         type: 'object',
         required: ['query'],
         properties: {
           query: { type: 'string', description: 'What to search for, e.g. "return policy", "project deadlines"' },
           topK: { type: 'number', description: 'Maximum number of excerpts to return (default: 8)' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_list_documents',
+      description: 'List documents in the knowledge bases (id, name, kbName). Call with no kbId to list ALL documents across every KB. Use this to discover which document holds the full reference you need, then read it with kb_get_document.',
+      parameters: {
+        type: 'object',
+        properties: {
+          kbId: { type: 'string', description: 'Optional: limit to one knowledge base. Omit to list all documents.' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'kb_get_document',
+      description: 'Read the FULL text of a knowledge-base document (all chunks joined). Use this — not kb_search — when you must go through an entire reference exhaustively, such as trying every payload in a payload list or following a complete checklist. Find the docId first with kb_list_documents.',
+      parameters: {
+        type: 'object',
+        required: ['docId'],
+        properties: {
+          docId: { type: 'string', description: 'The document id from kb_list_documents' }
         }
       }
     }

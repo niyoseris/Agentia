@@ -5,6 +5,27 @@ Agentia, Ollama ile çalışan ajan tabanlı bir Chrome MV3 tarayıcı asistanı
 
 ---
 
+## AŞAMA 12: Kapsamlı Güvenlik Testi İyileştirmeleri (seed v4)
+
+Gözlem: Bir XSS tarama görevinde ajan KB'deki geniş payload listesini kullanamadı (kb_search sadece top-K getirdi, yanlış chunk'lar geldi) ve birkaç payload deneyip "güvenli" dedi; rapor da otomatik-fallback ile üretildi.
+
+### 12.1 Full-doküman KB erişimi (kök neden)
+- `background.js`: `KB_LIST_ALL_DOCS` (tüm KB'lerdeki dokümanları listeler)
+- `tools.js`: `kb_list_documents {kbId?}` + `kb_get_document {docId}` — top-K değil, dokümanın TAMAMINI okur (ajan tüm payload listesini/kontrol listesini eline alır)
+- `agent-core.js`: case'ler + sanitizer (`kb_get_document` ~40KB cap) + READ_ONLY set + kb_search açıklaması "tam içerik için kb_get_document kullan" uyarısı
+
+### 12.2 Sızma-testi skill'i genişletildi (`builtins.js`, `sizma-testi-ileri`)
+- **Payload tüketimi**: kb_list_documents→kb_get_document ile tam listeyi al, kategori kategori (HTML/attr/JS/URL/SVG/fragment/encoding/filter/WAF/AngularJS/meta/host-header/CRLF/open-redirect) sistematik dene, "Kapsam Tablosu" tut, birkaç payload'la yetinme
+- **DOM XSS için JS kaynak okuma**: statik/SPA sitelerde reflected yoksa DOM-based riski var — JS'i http_request ile çekip source→sink (location.hash→innerHTML vb.) izle, fragment payload'ları test et
+- **Zorunlu yapılandırılmış rapor**: ajan raporu kendi yazsın (file_update ile), otomatik fallback'e bırakmasın; Kapsam Tablosu + "Doğrulanamayan Bulgular" (moderasyon bekleyen stored XSS) + "Bırakılan Payload'lar & Temizlik" bölümleri
+- **Kalıcı iz takibi**: gönderilen stored payload'lar not edilip temizlik talimatıyla raporlanır
+
+### 12.3 Diğer
+- `agent-core.js`: güvenlik bağlamında (aktif test açık veya persona "Güvenlik Denetçisi") recipe auto-save bastırıldı — "XSS gönderme adımları" recipe olarak kaydedilmesin, tekrar payload plantlanmasın
+- Seed v4: built-in skill talimatları da persona gibi edit-safe parmak-izi ile tazeleniyor (kullanıcı düzenlemişse ezilmez)
+
+---
+
 ## AŞAMA 1: Güvenlik Düzeltmeleri (Tamamlandı)
 
 ### 1.1 INJECT_SCRIPT arbitrary code execution kaldırıldı

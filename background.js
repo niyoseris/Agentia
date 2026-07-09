@@ -809,6 +809,18 @@ async function handleMessage(message, sender, sendResponse) {
         break;
       }
 
+      case 'KB_LIST_ALL_DOCS': {
+        // All documents across every KB (so the agent can find a doc by name)
+        const kbs = await kbStore.listKbs();
+        const all = [];
+        for (const kb of kbs) {
+          const docs = await kbStore.listDocs(kb.id);
+          for (const d of docs) all.push({ id: d.id, name: d.name, kbId: kb.id, kbName: kb.name, chunkCount: d.chunkCount });
+        }
+        sendResponse({ success: true, data: all });
+        break;
+      }
+
       case 'KB_DELETE_DOC': {
         await kbStore.deleteDoc(payload.id);
         sendResponse({ success: true });
